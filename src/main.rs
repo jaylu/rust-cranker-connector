@@ -25,16 +25,23 @@ async fn connect_to_router() {
         Ok((stream, response)) => {
             println!("stream={:?}, response={:?}", stream, response);
             let (write, read) = stream.split();
-            read.for_each(|message| async {
+            let reading = read.for_each(|message| async {
                 match message {
                     Ok(msg) => {
                         if (msg.is_text()) {
-                            println!("error: {:?}", msg.into_text())
+                            // construct http reqeust
+                            println!("text: {:?}", msg.into_text())
+                        } else if (msg.is_binary()) {
+                            println!("binary_text: {:?}", msg.into_text())
+                            // continue send http body
+                        } else if (msg.is_close()) {
+                            //
                         }
                     }
                     Err(_) => {}
                 }
             });
+            reading.await;
         }
         Err(e) => {
             eprintln!("error: {:?}", e);
