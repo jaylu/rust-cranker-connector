@@ -6,14 +6,25 @@ use async_tungstenite::tungstenite::handshake::client::{generate_key, Request};
 use async_tungstenite::tungstenite::{Error, Message};
 
 use futures::StreamExt;
+use futures::executor;
+use hyper::Client;
 
-fn parse(input: &str) {
-    let split = input.split("\n");
-    let method
-    split.for_each(|item| {
+async fn  parse(input: &str) {
+    let split: Vec<&str> = input.split("\n").collect();
+    let head_0: Vec<&str> = split[0].split(" ").collect();
+    let method = head_0[0];
+    let path = head_0[1];
+    let version = head_0[2];
 
-    })
+    let client = Client::new();
 
+// Parse an `http::Uri`...
+    let uri = path.parse().unwrap();
+
+// Await the response...
+    let mut resp = client.get(uri).await;
+
+    println!("Response: {}", resp.unwrap().status());
 }
 
 async fn connect_to_router() {
@@ -80,11 +91,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use crate::parse;
-
+    use futures::executor;
     #[test]
     fn test_parse() {
         let input = "POST /post-msg HTTP/1.1\nUser-Agent:curl/7.64.1\nHost:localhost:9443\nAccept:*/*\nContent-Length:52\nContent-Type:application/json\nForwarded:for=0:0:0:0:0:0:0:1;proto=https;host=localhost:9443;by=0:0:0:0:0:0:0:1\nX-Forwarded-For:0:0:0:0:0:0:0:1\nX-Forwarded-Proto:https\nX-Forwarded-Host:localhost:9443\nX-Forwarded-Server:0:0:0:0:0:0:0:1\n\n_1";
-        parse(input)
+        executor::block_on( parse(input));
     }
-
 }
