@@ -15,6 +15,16 @@ Cranker connector with Rust
     # health: http://localhost:12438/health
     # http: https://localhost:9443
     ```
-2. 
+
+2. send request to cranker server via curl
+
+    ```shell
+    # POST
+    curl -k -vvv -X POST -H "Content-Type: application/json"  -d '{"name": "linuxize", "email":"linuxize@example.com"}' https://localhost:9443/post-msg
+
+    # GET
+    curl -k -vvv https://localhost:9443/get-msg
+    ```
+3. 
 
 # Release
