@@ -1,30 +1,41 @@
+use std::ops::Index;
+use std::str::FromStr;
+
 use async_native_tls::TlsConnector;
 use async_tungstenite::async_std::{
     connect_async, connect_async_with_config, connect_async_with_tls_connector,
 };
-use async_tungstenite::tungstenite::handshake::client::{generate_key, Request};
 use async_tungstenite::tungstenite::{Error, Message};
-
-use futures::StreamExt;
+use async_tungstenite::tungstenite::handshake::client::{generate_key, Request};
+use async_tungstenite::tungstenite::http::HeaderValue;
+use async_tungstenite::tungstenite::http::request::Builder;
 use futures::executor;
-use hyper::Client;
+use futures::StreamExt;
+use hyper::{Body, Client, Method};
+use hyper::Request as hyper_request;
 
-async fn  parse(input: &str) {
-    let split: Vec<&str> = input.split("\n").collect();
-    let head_0: Vec<&str> = split[0].split(" ").collect();
-    let method = head_0[0];
-    let path = head_0[1];
-    let version = head_0[2];
+async fn parse(input: &'static str) -> Builder {
+    let lines: Vec<&str> = input.split("\n").collect();
+    let first_line_fields: Vec<&str> = lines[0].split(" ").collect();
+    let method = first_line_fields[0];
+    let path = first_line_fields[1];
+    // let version = first_line_fields[2];
 
-    let client = Client::new();
+    // match split.pop();
+    let mut request_builder = hyper_request::builder();
+    let headers = request_builder.headers_mut().unwrap();
+    for line in &lines[1..] {
+        match line.find(":") {
+            Some(index) => {
+                headers.insert(&line[0..index], HeaderValue::from_static(&line[index..]));
+            },
+            None => ()
+        }
+    }
 
-// Parse an `http::Uri`...
-    let uri = path.parse().unwrap();
-
-// Await the response...
-    let mut resp = client.get(uri).await;
-
-    println!("Response: {}", resp.unwrap().status());
+    return request_builder
+        .method(Method::from_str(method).unwrap())
+        .uri(format!("{}{}", "http://localhost:8080", path));
 }
 
 async fn connect_to_router() {
@@ -90,11 +101,20 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::parse;
     use futures::executor;
+
+    use crate::parse;
+
     #[test]
     fn test_parse() {
         let input = "POST /post-msg HTTP/1.1\nUser-Agent:curl/7.64.1\nHost:localhost:9443\nAccept:*/*\nContent-Length:52\nContent-Type:application/json\nForwarded:for=0:0:0:0:0:0:0:1;proto=https;host=localhost:9443;by=0:0:0:0:0:0:0:1\nX-Forwarded-For:0:0:0:0:0:0:0:1\nX-Forwarded-Proto:https\nX-Forwarded-Host:localhost:9443\nX-Forwarded-Server:0:0:0:0:0:0:0:1\n\n_1";
-        executor::block_on( parse(input));
+        executor::block_on(parse(input));
+    }
+
+    #[test]
+    fn test_vec() {
+        let sample = vec!["a", "b", "c"];
+        let index = 2;
+        println!("output: {:?}", &sample[0..index]);
     }
 }
