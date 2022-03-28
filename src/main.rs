@@ -1,4 +1,3 @@
-use std::ops::Index;
 use std::str::FromStr;
 
 use async_native_tls::TlsConnector;
@@ -9,9 +8,10 @@ use async_tungstenite::tungstenite::{Error, Message};
 use async_tungstenite::tungstenite::handshake::client::{generate_key, Request};
 use async_tungstenite::tungstenite::http::HeaderValue;
 use async_tungstenite::tungstenite::http::request::Builder;
-use futures::executor;
+use futures::{executor, TryStreamExt};
 use futures::StreamExt;
 use hyper::{Body, Client, Method};
+use hyper::body::HttpBody;
 use hyper::Request as hyper_request;
 
 async fn parse(input: &'static str) -> Builder {
@@ -21,7 +21,6 @@ async fn parse(input: &'static str) -> Builder {
     let path = first_line_fields[1];
     // let version = first_line_fields[2];
 
-    // match split.pop();
     let mut request_builder = hyper_request::builder();
     let headers = request_builder.headers_mut().unwrap();
     for line in &lines[1..] {
@@ -39,6 +38,7 @@ async fn parse(input: &'static str) -> Builder {
 }
 
 async fn connect_to_router() {
+    let client = Client::new();
     let connector = TlsConnector::new().danger_accept_invalid_certs(true);
     let request = Request::builder()
         .method("GET")
@@ -94,9 +94,35 @@ async fn connect_to_router() {
     }
 }
 
+async fn test_main() {
+    let client = Client::new();
+
+    let req = hyper_request::builder()
+        .method(Method::GET)
+        .uri("http://localhost:8080/apply/")
+        .body(Body::from(r#"{"library":"hyper"}"#)).unwrap();
+
+    let mut resp = client.request(req).await.unwrap();
+    println!("status={}", resp.status());
+
+
+    while let Some(next) = resp.data().await {
+        let chunk = next.unwrap();
+        let body_string = String::from_utf8(chunk.to_vec()).unwrap();
+        print!("{}", body_string)
+    }
+
+
+    // let bytes = hyper::body::to_bytes(resp.into_body()).await.unwrap();
+    // let body_string = String::from_utf8(bytes.to_vec()).unwrap();
+    // println!("body={}", body_string);
+
+}
+
 #[tokio::main]
 async fn main() {
-    connect_to_router().await
+    // connect_to_router().await
+    test_main().await
 }
 
 #[cfg(test)]
