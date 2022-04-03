@@ -1,3 +1,4 @@
+use std::borrow::{Borrow, BorrowMut};
 use std::str::FromStr;
 
 use async_native_tls::TlsConnector;
@@ -8,13 +9,16 @@ use async_tungstenite::tungstenite::{Error, Message};
 use async_tungstenite::tungstenite::handshake::client::{generate_key, Request};
 use async_tungstenite::tungstenite::http::HeaderValue;
 use async_tungstenite::tungstenite::http::request::Builder;
-use futures::{executor, TryStreamExt};
+use bytes::Bytes;
+use futures::{executor, Sink, SinkExt, TryStreamExt};
 use futures::StreamExt;
 use hyper::{Body, Client, Method};
 use hyper::body::HttpBody;
 use hyper::Request as hyper_request;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver, Sender};
 
-async fn parse(input: &'static str) -> Builder {
+fn parse(input: &str) -> Builder {
     let lines: Vec<&str> = input.split("\n").collect();
     let first_line_fields: Vec<&str> = lines[0].split(" ").collect();
     let method = first_line_fields[0];
@@ -22,11 +26,10 @@ async fn parse(input: &'static str) -> Builder {
     // let version = first_line_fields[2];
 
     let mut request_builder = hyper_request::builder();
-    let headers = request_builder.headers_mut().unwrap();
     for line in &lines[1..] {
         match line.find(":") {
             Some(index) => {
-                headers.insert(&line[0..index], HeaderValue::from_static(&line[index..]));
+                request_builder = request_builder.header(&line[0..index], &line[index+1..]);
             },
             None => ()
         }
@@ -56,20 +59,59 @@ async fn connect_to_router() {
     let result = connect_async_with_tls_connector(request, Some(connector)).await;
     match result {
         Ok((stream, response)) => {
-            // println!("stream={:?}, response={:?}", stream, response);
-            let (write, read) = stream.split();
-            let reading = read.for_each(|message| async {
+            let (mut write, read) = stream.split();
+
+            let (tx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(32);
+
+            let reading = read.for_each( |message| async {
                 match message {
                     Ok(msg) => {
-                        if (msg.is_text()) {
+                        if msg.is_text() {
                             // construct http reqeust
                             let text_line = msg.into_text().unwrap();
                             println!("text: {:?}", text_line);
                             if text_line.ends_with("_1") {
                                 // has body
+                                println!("has_body");
+
                             } else if text_line.ends_with("_2") {
                                 // no body
                                 println!("no_body");
+
+                                let request_builder = parse(&text_line);
+
+                                let req = request_builder
+                                    .body(Body::from(r#"{"library":"hyper"}"#)).unwrap();
+
+                                let mut resp = client.request(req).await.unwrap();
+                                println!("status={}", resp.status());
+
+                                match tx.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
+                                    Ok(_) => {
+                                        println!("tx sent text")
+                                    },
+                                    Err(_) => {
+                                        println!("tx sent text error")
+                                    }
+                                }
+
+                                while let Some(next) = resp.data().await {
+
+                                    match next {
+                                        Ok(chunk) => {
+                                            match tx.send(Message::Binary(chunk.to_vec())).await {
+                                                Ok(_) => {println!("tx sent binary")},
+                                                Err(_) => {println!("tx sent binary error")}
+                                            }
+                                        },
+                                        Err(err) => {
+                                            println!("error {}", err)
+                                        }
+                                    }
+                                }
+
+                                // done
+
                             } else if text_line.ends_with("_3") {
                                 // request finish
                                 println!("no_body_no_content_length");
@@ -86,7 +128,20 @@ async fn connect_to_router() {
                     Err(_) => {}
                 }
             });
+
+            println!("reading.await");
             reading.await;
+            println!("reading.await done");
+
+            while let Some(message) = rx.recv().await {
+                let send_result = write.send(message).await;
+                match send_result {
+                    Ok(_) => {println!("write send")}
+                    Err(_) => {println!("write send error")}
+                }
+            }
+
+
         }
         Err(e) => {
             eprintln!("error: {:?}", e);
@@ -121,20 +176,22 @@ async fn test_main() {
 
 #[tokio::main]
 async fn main() {
-    // connect_to_router().await
-    test_main().await
+    connect_to_router().await
+    // test_main().await
 }
 
 #[cfg(test)]
 mod tests {
-    use futures::executor;
 
     use crate::parse;
 
     #[test]
     fn test_parse() {
         let input = "POST /post-msg HTTP/1.1\nUser-Agent:curl/7.64.1\nHost:localhost:9443\nAccept:*/*\nContent-Length:52\nContent-Type:application/json\nForwarded:for=0:0:0:0:0:0:0:1;proto=https;host=localhost:9443;by=0:0:0:0:0:0:0:1\nX-Forwarded-For:0:0:0:0:0:0:0:1\nX-Forwarded-Proto:https\nX-Forwarded-Host:localhost:9443\nX-Forwarded-Server:0:0:0:0:0:0:0:1\n\n_1";
-        executor::block_on(parse(input));
+        let builder = parse(input);
+        let headers = builder.headers_ref().unwrap();
+        assert_eq!(headers["X-Forwarded-Server"], "0:0:0:0:0:0:0:1");
+        assert_eq!(headers["Accept"], "*/*");
     }
 
     #[test]

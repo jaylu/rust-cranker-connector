@@ -11,5 +11,6 @@ async-native-tls = "0.4.0"
 tokio = { version = "1.15.0", features = ["full"] }
 async-tungstenite = {version = "0.17.1", features = ["async-std-runtime", "async-native-tls"]}
 hyper = { version = "0.14", features = ["full"] }
+bytes = "1.1.0"
 #async-std = "1.10.0"
 #futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
