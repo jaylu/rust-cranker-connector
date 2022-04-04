@@ -64,7 +64,7 @@ async fn connect_to_router() {
         Ok((mut stream, response)) => {
             let (mut write, read) = stream.split();
 
-            let (tx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(32);
+            // let (tx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(32);
 
             let reading = read.for_each(|message| async {
                 match message {
@@ -88,7 +88,7 @@ async fn connect_to_router() {
                                 let mut resp = client.request(req).await.unwrap();
                                 println!("status={}", resp.status());
 
-                                match tx.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
+                                match &write.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
                                     Ok(_) => {
                                         println!("tx sent text")
                                     }
@@ -101,10 +101,10 @@ async fn connect_to_router() {
                                     match next {
                                         Ok(chunk) => {
                                             // TODO: zero-copy
-                                            match tx.send(Message::Binary(chunk.to_vec())).await {
-                                                Ok(_) => { println!("tx sent binary") }
-                                                Err(_) => { println!("tx sent binary error") }
-                                            }
+                                            // match write.send(Message::Binary(chunk.to_vec())).await {
+                                            //     Ok(_) => { println!("tx sent binary") }
+                                            //     Err(_) => { println!("tx sent binary error") }
+                                            // }
                                         }
                                         Err(err) => {
                                             println!("error {}", err)
@@ -130,9 +130,9 @@ async fn connect_to_router() {
                 }
             });
 
-            let writing = do_send(&mut write, &mut rx);
+            // let writing = do_send(&mut write, &mut rx);
 
-            join!(reading, writing);
+            // reading.
         }
         Err(e) => {
             eprintln!("error: {:?}", e);
@@ -149,6 +149,7 @@ async fn do_send(write: &mut SplitSink<WebSocketStream<ConnectStream>, Message>,
         }
     }
     // TODO: fix
+    println!("send done");
     match write.close().await {
         Ok(_) => {println!("close")}
         Err(_) => {println!("close error")}
