@@ -100,6 +100,7 @@ async fn connect_to_router() {
                                 while let Some(next) = resp.data().await {
                                     match next {
                                         Ok(chunk) => {
+                                            // TODO: zero-copy
                                             match tx.send(Message::Binary(chunk.to_vec())).await {
                                                 Ok(_) => { println!("tx sent binary") }
                                                 Err(_) => { println!("tx sent binary error") }
@@ -129,11 +130,8 @@ async fn connect_to_router() {
                 }
             });
 
-            println!("reading.await");
-            // reading.await;
-            println!("reading.await done");
-
             let writing = do_send(&mut write, &mut rx);
+
             join!(reading, writing);
         }
         Err(e) => {
@@ -150,6 +148,7 @@ async fn do_send(write: &mut SplitSink<WebSocketStream<ConnectStream>, Message>,
             Err(_) => { println!("write send error") }
         }
     }
+    // TODO: fix
     match write.close().await {
         Ok(_) => {println!("close")}
         Err(_) => {println!("close error")}
