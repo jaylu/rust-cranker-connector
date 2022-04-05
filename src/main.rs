@@ -66,7 +66,7 @@ async fn connect_to_router() {
 
             // let (tx, mut rx): (Sender<Message>, Receiver<Message>) = mpsc::channel(32);
 
-            let reading = read.for_each(|message| async {
+            let reading = read.fold(write, |mut write, message| async {
                 match message {
                     Ok(msg) => {
                         if msg.is_text() {
@@ -76,6 +76,7 @@ async fn connect_to_router() {
                             if text_line.ends_with("_1") {
                                 // has body
                                 println!("has_body");
+                                
                             } else if text_line.ends_with("_2") {
                                 // no body
                                 println!("no_body");
@@ -88,7 +89,7 @@ async fn connect_to_router() {
                                 let mut resp = client.request(req).await.unwrap();
                                 println!("status={}", resp.status());
 
-                                match &write.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
+                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
                                     Ok(_) => {
                                         println!("tx sent text")
                                     }
@@ -111,11 +112,12 @@ async fn connect_to_router() {
                                         }
                                     }
                                 }
-
+                                
                                 // done
                             } else if text_line.ends_with("_3") {
                                 // request finish
                                 println!("no_body_no_content_length");
+                            }else{
                             }
 
                             // let println!("text: {:?}", msg.into_text());
@@ -125,8 +127,11 @@ async fn connect_to_router() {
                         } else if (msg.is_close()) {
                             //
                         }
+                        write
                     }
-                    Err(_) => {}
+                    Err(_) => {
+                        write
+                    }
                 }
             });
 
