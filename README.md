@@ -26,6 +26,9 @@ Cranker connector with Rust
     curl -k -vvv https://localhost:9443/get-msg
     curl http://127.0.0.1:8080/io.txt
     curl -k https://127.0.0.1:9443/io.txt
+   
+    # POST
+    curl -k -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://127.0.0.1:9443/post
     ```
 3. 
 
