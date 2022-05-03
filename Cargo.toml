@@ -13,5 +13,6 @@ async-tungstenite = {version = "0.17.1", features = ["async-std-runtime", "async
 hyper = { version = "0.14", features = ["full"] }
 bytes = "1.1.0"
 async-stream = "0.3.3"
+http = "0.2.6"
 #async-std = "1.10.0"
 #futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
