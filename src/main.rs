@@ -1,49 +1,38 @@
 use mpsc::channel;
-use std::borrow::{Borrow, BorrowMut};
-use std::collections::HashSet;
-use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc, Mutex};
-use std::sync::mpsc::Receiver;
+use std::sync::{Arc, mpsc, Mutex, RwLock};
+use std::sync::atomic::AtomicBool;
 use std::thread;
 use std::time::Duration;
+
 
 use async_native_tls::TlsConnector;
 use async_tungstenite::async_std::connect_async_with_tls_connector;
 use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
-use async_tungstenite::tungstenite::http::request::Builder;
-use async_tungstenite::tungstenite::Message;
+use async_tungstenite::tungstenite::{Error, Message};
 use async_tungstenite::tungstenite::protocol::CloseFrame;
 use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use bytes::Bytes;
+use dashmap::DashSet;
 use futures::SinkExt;
 use futures::StreamExt;
-use http::Uri;
-use hyper::{Body, Client, Method};
+use hyper::{Body, Client};
 use hyper::body::{HttpBody, Sender};
 use hyper::client::ResponseFuture;
-use hyper::Request as hyper_request;
+use tokio::sync::oneshot;
+use tokio::time;
+use tokio::time::Instant;
 
 use uuid::Uuid;
 
 mod lib;
 
-fn startConnectorSocket(connector_instance_id: String,
-                        registration_uri: String,
-                        target_uri: String,
-                        component_name: String,
-                        sender: mpsc::Sender<SocketEvent>) {
-    tokio::spawn(async move {
-        ConnectorSocket::new(connector_instance_id, registration_uri, target_uri, component_name).start(sender).await;
-    });
-}
-
-enum SocketEvent {
-    CREATE(String),
-    OPEN(String),
-    CONSUMED(String),
-    ERROR(String),
+enum RegistrationEvent {
+    RegistrationInit,
+    SocketCreate(String),
+    SocketOpen(String),
+    SocketConsumed(String),
+    SocketError(String),
 }
 
 struct Config<> {
@@ -71,16 +60,16 @@ impl CrankerConnector {
         let registration_urls = (&self.config.router_uri_provider)();
 
         for registration_url in registration_urls {
-            let mut registration = RouterRegistration::new(String::from(&self.connector_instance_id),
-                                                           registration_url,
-                                                           String::from(&self.config.target_uri),
-                                                           String::from(&self.config.component_name),
-                                                           self.config.sliding_window);
-            registration.start();
+            let registration = RouterRegistration::new(String::from(&self.connector_instance_id),
+                                                       registration_url,
+                                                       String::from(&self.config.target_uri),
+                                                       String::from(&self.config.component_name),
+                                                       String::from(&self.config.route),
+                                                       self.config.sliding_window);
+            tokio::spawn(async {
+                registration.start().await;
+            });
         }
-
-
-        // connect_to_router(target, &self.idle_count).await;
         return self;
     }
 
@@ -95,8 +84,8 @@ struct RouterRegistration {
     registration_uri: String,
     target_uri: String,
     component_name: String,
+    route: String,
     sliding_window: usize,
-    idle_sockets: HashSet<String>,
 }
 
 impl RouterRegistration {
@@ -104,81 +93,86 @@ impl RouterRegistration {
                registration_uri: String,
                target_uri: String,
                component_name: String,
+               route: String,
                sliding_window: usize) -> RouterRegistration {
         RouterRegistration {
             connector_instance_id,
             registration_uri,
             target_uri,
             component_name,
+            route,
             sliding_window,
-            idle_sockets: HashSet::new(),
         }
     }
 
     pub async fn start(self) {
-        let (sender, receiver): (mpsc::Sender<SocketEvent>, mpsc::Receiver<SocketEvent>) = channel();
-        let mut idle_sockets = HashSet::new();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);
+        let sender_2 = sender.clone();
+        let idle_sockets = Arc::new(DashSet::new());
+        let idle_sockets_2 = Arc::clone(&idle_sockets);
 
+        let add_anything_missing = move |clone_sender: tokio::sync::mpsc::Sender<RegistrationEvent>| {
+            println!("add anything missing, idles_sockets size={}", idle_sockets_2.len());
 
-        let add_anything_missing = move |current_idle: &HashSet<String>, clone_sender: mpsc::Sender<SocketEvent>| {
-
-            let connector_instance_id = String::from(&self.connector_instance_id);
-            let registration_uri = String::from(&self.registration_uri);
-            let target_uri = String::from(&self.target_uri);
-            let component_name = String::from(&self.component_name);
-
-            while current_idle.len() < self.sliding_window {
-                let connector_instance_id_copy = String::from(&connector_instance_id);
-                let registration_uri_copy = String::from(&registration_uri);
-                let target_uri_copy = String::from(&target_uri);
-                let component_name_copy = String::from(&component_name);
+            while idle_sockets_2.len() < self.sliding_window {
+                let connector_instance_id = String::from(&self.connector_instance_id);
+                let registration_uri = String::from(&self.registration_uri);
+                let target_uri = String::from(&self.target_uri);
+                let component_name = String::from(&self.component_name);
+                let route = String::from(&self.route);
                 let cc_sender = clone_sender.clone();
+                println!("debug: creating connector socket");
+
+                let mut socket = ConnectorSocket::new(connector_instance_id, registration_uri, target_uri, component_name, route);
+                let socket_id = String::from(&socket.socket_id);
+                let socket_id_clone = socket_id.clone();
+                idle_sockets_2.insert(socket_id);
+                println!("debug: idles_sockets add {}, size={}", socket_id_clone, idle_sockets_2.len());
+
                 tokio::spawn(async move {
-                    ConnectorSocket::new(connector_instance_id_copy, registration_uri_copy,
-                                         target_uri_copy, component_name_copy).start(cc_sender).await;
+                    println!("debug: starting connector socket");
+                    socket.start(cc_sender).await;
                 });
             }
         };
 
         tokio::spawn(async move {
-            for event in receiver.recv() {
-                let sender_2 = sender.clone();
+            println!("debug: start receiving event");
+            let sender_3 = sender.clone();
+            while let Some(event) = receiver.recv().await {
+                println!("debug: received event");
                 match event {
-                    SocketEvent::CREATE(socket_id) => {
-                        idle_sockets.insert(socket_id);
-                    },
-                    SocketEvent::OPEN(socket_id )=> {
-
-                    },
-                    SocketEvent::CONSUMED(socket_id) => {
-                        idle_sockets.remove(socket_id.as_str());
-                        add_anything_missing(&idle_sockets, sender_2);
-                    },
-                    SocketEvent::ERROR(socket_id) => {
+                    RegistrationEvent::RegistrationInit => {
+                        add_anything_missing(sender_3.clone());
+                    }
+                    RegistrationEvent::SocketCreate(socket_id) => {
+                        let string = String::from(&socket_id);
+                        idle_sockets.insert(string);
+                        println!("debug: idles_sockets add {}, size={}", &socket_id, idle_sockets.len());
+                    }
+                    RegistrationEvent::SocketOpen(_socket_id) => {}
+                    RegistrationEvent::SocketConsumed(socket_id) => {
+                        idle_sockets.remove(&socket_id);
+                        // println!("debug: idles_sockets remove {}, size={}", &socket_id, idle_sockets.len());
+                        add_anything_missing(sender_3.clone());
+                    }
+                    RegistrationEvent::SocketError(socket_id) => {
                         // TODO: sleep and debounce
-                        idle_sockets.remove(socket_id.as_str());
-                        add_anything_missing(&idle_sockets, sender_2);
+                        idle_sockets.remove(&socket_id);
+                        // println!("debug: idles_sockets remove {}, size={}", &socket_id, idle_sockets.len());
+                        add_anything_missing(sender_3.clone());
                     }
                 }
             }
+            println!("debug: sender state {:?}", sender_3);
+            println!("debug: stop receiving event");
         });
 
-        // add_anything_missing(&idle_sockets);
-    }
-
-    pub fn add_anything_missing(connector_instance_id: String,
-                                registration_uri: String,
-                                target_uri: String,
-                                component_name: String,
-                                sender: mpsc::Sender<SocketEvent>) {
-
-        tokio::spawn(async move {
-            ConnectorSocket::new(connector_instance_id, registration_uri, target_uri, component_name).start(sender).await;
-        });
-
-        // while self.idle_sockets.len() < self.sliding_window as usize {
-        //
-        // }
+        match sender_2.send(RegistrationEvent::RegistrationInit).await {
+            Ok(x) => x,
+            Err(_) => todo!(),
+        };
+        println!("route registration started");
     }
 }
 
@@ -187,47 +181,61 @@ struct ConnectorSocket {
     registration_uri: String,
     target_uri: String,
     component_name: String,
+    route: String,
     socket_id: String,
+
 }
 
 impl ConnectorSocket {
     pub fn new(connector_instance_id: String,
                registration_uri: String,
                target_uri: String,
-               component_name: String) -> ConnectorSocket {
+               component_name: String,
+               route: String) -> ConnectorSocket {
         ConnectorSocket {
             connector_instance_id,
             registration_uri,
             target_uri,
             component_name,
+            route,
             socket_id: Uuid::new_v4().to_string(),
         }
     }
 
-    async fn stop(&mut self) {}
+    async fn stop(&mut self) {
 
-    async fn start(&mut self, sender: mpsc::Sender<SocketEvent>) {
+    }
+
+
+    async fn start(&mut self, sender: tokio::sync::mpsc::Sender<RegistrationEvent>) {
         self.connect_to_router(sender).await;
     }
 
-    async fn connect_to_router(&self, sender: mpsc::Sender<SocketEvent>) {
+    async fn connect_to_router(&self, sender: tokio::sync::mpsc::Sender<RegistrationEvent>) {
         let client = Client::new();
         let connector = TlsConnector::new().danger_accept_invalid_certs(true);
         let uri = format!("{}/register?connectorInstanceID={}&componentName={}",
-                          self.registration_uri, self.connector_instance_id, self.component_name);
+                          self.registration_uri,
+                          self.connector_instance_id,
+                          self.component_name);
         let target = &self.target_uri;
+        let route = &self.route;
         let request = Request::builder()
             .method("GET")
             .header("Host", "localhost")
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
             .header("CrankerProtocol", "1.0")
-            .header("Route", "*")
+            .header("Route", route)
             .header("Sec-WebSocket-Version", "13")
             .header("Sec-WebSocket-Key", generate_key())
-            .uri(uri)
+            .uri(&uri)
             .body(())
             .unwrap();
+
+        let mut isStarted = AtomicBool::new(false);
+
+        println!("connector socket: connecting to {}", &uri);
 
         match connect_async_with_tls_connector(request, Some(connector)).await {
             Ok((stream, _response)) => {
@@ -237,104 +245,120 @@ impl ConnectorSocket {
                 let mut client_request_future: Option<ResponseFuture> = None;
                 let mut is_consumed = false;
 
-                while let Some(message) = read.next().await {
-                    if !is_consumed {
-                        sender.send(SocketEvent::CONSUMED(String::from(&self.socket_id))).unwrap();
-                        is_consumed = true;
+                // setup ping pong heart beat
+                *isStarted.get_mut() = false;
+                let mut ping_interval = time::interval(Duration::from_secs(5));
+                while *isStarted.get_mut() {
+                    ping_interval.tick().await;
+                    match write.send(Message::Ping("ping".as_bytes().to_vec())).await {
+                        Ok(_) => {}
+                        Err(_) => {}
                     }
+                }
 
+                &ping_interval.tick().await;
+
+                while let Some(message) = read.next().await {
                     match message {
                         Ok(msg) => {
-                            if msg.is_text() {
-                                // construct http request
-                                let text_line = msg.into_text().unwrap();
-                                println!("text: {:?}", text_line);
-                                if text_line.ends_with("_1") {
+                            match msg {
+                                Message::Text(_) => {
+                                    // construct http request
+                                    let text_line = msg.into_text().unwrap();
+                                    println!("text: {:?}", text_line);
 
-                                    // has body
-                                    let (sender, body) = Body::channel();
-                                    body_writer = Some(sender);
-
-                                    let request_builder = lib::parse(&text_line, target);
-                                    let req = request_builder.body(body).unwrap();
-
-                                    client_request_future = Some(client.request(req));
-                                } else if text_line.ends_with("_2") {
-
-                                    // no body
-                                    let req = lib::parse(&text_line, target).body(Body::empty()).unwrap();
-                                    let mut resp = client.request(req).await.unwrap();
-
-                                    match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
-                                        Ok(_) => { println!("tx response sent text") }
-                                        Err(_) => { println!("tx response sent text error") }
-                                    }
-
-                                    while let Some(next) = resp.data().await {
-                                        match next {
-                                            Ok(chunk) => {
-                                                match write.send(Message::Binary(chunk.to_vec())).await {
-                                                    Ok(_) => { println!("tx response sent binary"); }
-                                                    Err(_) => { println!("tx response sent binary error") }
-                                                }
-                                            }
-                                            Err(err) => { println!("error {}", err) }
+                                    if !is_consumed {
+                                        match sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
+                                            Ok(()) => {}
+                                            Err(error) => println!("error: {}", error)
                                         }
+                                        is_consumed = true;
                                     }
 
-                                    match write.send(
-                                        Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "normal close".into() }))
-                                    ).await {
-                                        Ok(_) => { println!("close done"); }
-                                        Err(_) => { println!("close error") }
-                                    }
+                                    if text_line.ends_with("_1") { // has body
 
-                                    println!("write close")
-                                } else if text_line.ends_with("_3") {
+                                        let (sender, body) = Body::channel();
+                                        body_writer = Some(sender);
 
-                                    // body send completed
+                                        let req = lib::parse(&text_line, target).body(body).unwrap();
+                                        client_request_future = Some(client.request(req));
+                                    } else if text_line.ends_with("_2") { // no body
 
-                                    let mut response = client_request_future.as_mut().unwrap().await.unwrap();
+                                        let req = lib::parse(&text_line, target).body(Body::empty()).unwrap();
+                                        let mut resp = client.request(req).await.unwrap();
 
-                                    match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status()))).await {
-                                        Ok(_) => { println!("tx sent text") }
-                                        Err(_) => { println!("tx sent text error") }
-                                    }
+                                        match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", resp.status()))).await {
+                                            Ok(_) => { println!("tx response sent text") }
+                                            Err(_) => { println!("tx response sent text error") }
+                                        }
 
-                                    // write.send_all(resp.body().data().into_stream());
-                                    while let Some(next) = response.data().await {
-                                        match next {
-                                            Ok(chunk) => {
-                                                match write.send(Message::Binary(chunk.to_vec())).await {
-                                                    Ok(_) => { println!("tx sent binary"); }
-                                                    Err(_) => { println!("tx sent binary error") }
+                                        while let Some(next) = resp.data().await {
+                                            match next {
+                                                Ok(chunk) => {
+                                                    match write.send(Message::Binary(chunk.to_vec())).await {
+                                                        Ok(_) => { println!("tx response sent binary"); }
+                                                        Err(_) => { println!("tx response sent binary error") }
+                                                    }
                                                 }
-                                            }
-                                            Err(err) => {
-                                                println!("error {}", err)
+                                                Err(err) => { println!("error {}", err) }
                                             }
                                         }
-                                    }
 
-                                    match write.send(
-                                        Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "normal close".into() }))
-                                    ).await {
-                                        Ok(_) => { println!("close done"); }
-                                        Err(_) => { println!("tx sent binary error") }
-                                    }
+                                        match write.send(
+                                            Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "normal close".into() }))
+                                        ).await {
+                                            Ok(_) => { println!("close done"); }
+                                            Err(_) => { println!("close error") }
+                                        }
 
-                                    println!("write close")
-                                } else {}
-                            } else if msg.is_binary() {
-                                if body_writer.as_mut().is_some() {
-                                    let writer = body_writer.as_mut().unwrap();
-                                    match writer.send_data(Bytes::from(msg.into_data())).await {
-                                        Ok(_) => { println!("writer send data done") }
-                                        Err(_) => { println!("writer send data err") }
-                                    };
+                                        println!("write close")
+                                    } else if text_line.ends_with("_3") {  // body send completed
+
+                                        let mut response = client_request_future.as_mut().unwrap().await.unwrap();
+
+                                        match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status()))).await {
+                                            Ok(_) => { println!("tx sent text") }
+                                            Err(_) => { println!("tx sent text error") }
+                                        }
+
+                                        // write.send_all(resp.body().data().into_stream());
+                                        while let Some(next) = response.data().await {
+                                            match next {
+                                                Ok(chunk) => {
+                                                    match write.send(Message::Binary(chunk.to_vec())).await {
+                                                        Ok(_) => { println!("tx sent binary"); }
+                                                        Err(_) => { println!("tx sent binary error") }
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    println!("error {}", err)
+                                                }
+                                            }
+                                        }
+
+                                        match write.send(
+                                            Message::Close(Some(CloseFrame { code: CloseCode::Normal, reason: "normal close".into() }))
+                                        ).await {
+                                            Ok(_) => { println!("close done"); }
+                                            Err(_) => { println!("tx sent binary error") }
+                                        }
+
+                                        println!("write close")
+                                    } else {}
                                 }
-                            } else if msg.is_close() {
-                                // clean up
+                                Message::Binary(_) => {
+                                    if body_writer.as_mut().is_some() {
+                                        let writer = body_writer.as_mut().unwrap();
+                                        match writer.send_data(Bytes::from(msg.into_data())).await {
+                                            Ok(_) => { println!("writer send data done") }
+                                            Err(_) => { println!("writer send data err") }
+                                        };
+                                    }
+                                }
+                                Message::Ping(_) => {}
+                                Message::Pong(_) => {}
+                                Message::Close(_) => {}
+                                Message::Frame(_) => {}
                             }
                         }
                         Err(_) => {}
@@ -348,39 +372,31 @@ impl ConnectorSocket {
     }
 }
 
-async fn async_fn() {
-    println!("async_fn");
-}
-
 #[tokio::main]
 async fn main() {
     // let config = Config {
     //     route: String::from("*"),
     //     target_uri: String::from("http://localhost:8080"),
     //     component_name: String::from("rust-testing-component"),
-    //     router_uri_provider: || { vec![String::from("wss://localhost:16488/register?connectorId=abc")] },
+    //     router_uri_provider: || { vec![String::from("wss://localhost:12001")] },
     //     sliding_window: 2,
     // };
     // let mut connector = CrankerConnector::new(config);
     // connector.start().await;
-    // test_main().await
+    //
+    // thread::sleep(Duration::from_secs(3000))
 
-}
 
-fn test_async() {
-    let mut handles = vec![];
+    println!("started");
+    let mut interval = time::interval(Duration::from_secs(2));
+    &interval.tick().await;
 
-    let handle1 = tokio::spawn(async {
-        async_fn().await
-    });
-    handles.push(handle1);
+    let (tx, rx) = oneshot::channel();
+    let mut isStarted = true;
 
-    let handle2 = tokio::spawn(async {
-        async_fn().await
-    });
-    handles.push(handle2);
+    tx.send("cancel").unwrap();
 
-    thread::sleep(Duration::from_secs(2));
+    interval.reset();
 }
 
 #[cfg(test)]

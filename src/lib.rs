@@ -29,7 +29,9 @@ pub fn parse(input: &str, target: &str) -> Builder {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Borrow;
+    use std::borrow::{Borrow, BorrowMut};
+    use std::cell::{RefCell, RefMut};
+    use std::collections::HashMap;
     use std::rc::Rc;
     use std::slice::RChunks;
     use std::sync::{Arc, Mutex};
@@ -129,6 +131,22 @@ mod tests {
         value.push("e");
 
         println!("box after update: {:?}", &value);
+    }
+
+    #[test]
+    fn test_tokio_select() {
+    //     tokio::select! {
+    //     _ = async {
+    //         while &isStarted {
+    //             &interval.tick().await;
+    //         }
+    //         println!("complete")
+    //     } => {},
+    //     _cancel = rx => {
+    //         isStarted = false;
+    //         println!("cancel")
+    //     }
+    // }
     }
 
 }
