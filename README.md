@@ -7,6 +7,16 @@ Cranker connector with Rust
      GET   --------> router <-------- connector ---> HTTP Service
                  |              |
 
+# TODO
+
+This project is still in development, below tasks needs to be completed before using it in production
+
+* fix memory increase
+* heart beat for each websocket channel
+* stop by calling wss deregister end point
+* proper error handling
+* graceful shutdown
+
 # Development
 
 1. start cranker from local first
