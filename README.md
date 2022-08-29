@@ -30,15 +30,13 @@ This project is still in development, below tasks needs to be completed before u
 
     ```shell
     # POST
-    curl -k -vvv -X POST -H "Content-Type: application/json"  -d '{"name": "linuxize", "email":"linuxize@example.com"}' https://localhost:9443/post-msg
+    curl -k -vvv -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://127.0.0.1:12000/post
 
     # GET
-    curl -k -vvv https://localhost:9443/get-msg
-    curl http://127.0.0.1:8080/io.txt
-    curl -k https://127.0.0.1:9443/io.txt
+    curl -k -H "Content-Type: application/json" https://localhost:12000/hello 
    
     # POST
-    curl -k -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://127.0.0.1:9443/post
+    curl -k -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://localhost:12000/post
     ```
 3. 
 

@@ -19,7 +19,7 @@ pub fn parse(input: &str, target: &str) -> Builder {
     }
 
     let uri = format!("{}{}", target, path);
-    println!("uri={}", uri);
+    println!("uri={}, method={}", uri, method);
     return request_builder
         .method(Method::from_str(method).unwrap())
         .uri(uri);

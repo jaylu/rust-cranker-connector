@@ -1,4 +1,3 @@
-use mpsc::channel;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -14,12 +13,14 @@ use async_tungstenite::tungstenite::protocol::CloseFrame;
 use async_tungstenite::tungstenite::{Error, Message};
 use bytes::Bytes;
 use dashmap::DashSet;
-use futures::SinkExt;
-use futures::StreamExt;
-use hyper::body::{HttpBody, Sender};
+use futures::{future, StreamExt};
+use futures::{FutureExt, SinkExt};
+use http::Response;
+use hyper::body::{HttpBody};
 use hyper::client::{HttpConnector, ResponseFuture};
 use hyper::{Body, Client};
-use tokio::sync::mpsc::error::SendError;
+
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::oneshot;
 use tokio::time;
 use tokio::time::Instant;
@@ -165,7 +166,6 @@ impl RouterRegistration {
             println!("debug: start receiving event");
             let sender_3 = sender.clone();
             while let Some(event) = receiver.recv().await {
-                println!("debug: received event");
                 match event {
                     RegistrationEvent::RegistrationInit => {
                         add_anything_missing();
@@ -215,12 +215,6 @@ struct ConnectorSocket {
     route: String,
     socket_id: String,
     registration_sender: tokio::sync::mpsc::Sender<RegistrationEvent>,
-    internal_sender: Option<tokio::sync::mpsc::Sender<SocketEvent>>,
-}
-
-enum SocketEvent {
-    Stop,
-    WriteToCranker(Message),
 }
 
 impl ConnectorSocket {
@@ -244,39 +238,43 @@ impl ConnectorSocket {
             route,
             socket_id: Uuid::new_v4().to_string(),
             registration_sender: sender,
-            internal_sender: None,
+            // internal_sender: None,
         }
     }
 
     async fn stop(&mut self) {
-        if self.internal_sender.is_some() {
-            println!("stopping connector socket");
-            match self
-                .internal_sender
-                .clone()
-                .unwrap()
-                .send(SocketEvent::Stop)
-                .await
-            {
-                Ok(_) => {}
-                Err(_) => {}
-            };
-        }
+        // if self.internal_sender.is_some() {
+        //     println!("stopping connector socket");
+        //     match self
+        //         .internal_sender
+        //         .clone()
+        //         .unwrap()
+        //         .send(SocketEvent::Stop)
+        //         .await
+        //     {
+        //         Ok(_) => {}
+        //         Err(_) => {}
+        //     };
+        // }
     }
 
     async fn start(&mut self) {
         self.connect_to_router(self.client.clone(), self.tls_connector_provider).await;
     }
 
-    async fn connect_to_router(&mut self, client: Client<HttpConnector>, tls_connector_provider: fn() -> Option<TlsConnector>) {
+    async fn connect_to_router(
+        &mut self,
+        client: Client<HttpConnector>,
+        tls_connector_provider: fn() -> Option<TlsConnector>,
+    ) {
         let sender = &self.registration_sender.clone();
         let connector = tls_connector_provider().unwrap();
-        let uri = format!(
-            "{}/register?connectorInstanceID={}&componentName={}",
+        let uri = format!( "{}/register?connectorInstanceID={}&componentName={}",
             self.registration_uri, self.connector_instance_id, self.component_name
         );
         let target = &self.target_uri;
         let route = &self.route;
+        let socket_id = String::from(&self.socket_id);
         let request = Request::builder()
             .method("GET")
             .header("Host", "localhost")
@@ -297,226 +295,103 @@ impl ConnectorSocket {
 
         match connect_async_with_tls_connector(request, Some(connector)).await {
             Ok((stream, _response)) => {
-                let (mut write, mut read) = stream.split();
+                let (mut wss_write, mut read) = stream.split();
 
-                let mut body_writer: Option<Sender> = None;
-                let mut client_request_future: Option<ResponseFuture> = None;
+                let mut target_body_writer: Option<hyper::body::Sender> = None;
+                let mut target_request_future: Option<ResponseFuture> = None;
                 let mut is_consumed = false;
-                let is_started = Arc::new(AtomicBool::new(true));
-                let is_started_clone = Arc::clone(&is_started);
 
-                // receive stop signal
-                let (internal_sender, mut internal_receiver) = tokio::sync::mpsc::channel(1);
-                let internal_sender_1 = internal_sender.clone();
-                let internal_sender_2 = internal_sender.clone();
-                self.internal_sender = Some(internal_sender);
-                tokio::spawn(async move {
-                    while let Some(event) = internal_receiver.recv().await {
-                        match event {
-                            SocketEvent::Stop => {
-                                is_started_clone.store(false, Ordering::SeqCst);
-                            }
-                            SocketEvent::WriteToCranker(message) => {
-                                match write.send(message).await {
-                                    Ok(_) => {}
-                                    Err(_) => {}
-                                }
-                            }
-                        }
-                    }
-                });
+                let (write, mut wss_bridge_rx) = tokio::sync::mpsc::channel(10);
 
-                // setup ping pong heart beat
                 tokio::spawn(async move {
                     let mut ping_interval = time::interval(Duration::from_secs(5));
-                    while is_started.load(Ordering::SeqCst) {
-                        ping_interval.tick().await;
-                        match internal_sender_1
-                            .send(SocketEvent::WriteToCranker(Message::Ping(
-                                "ping".as_bytes().to_vec(),
-                            )))
-                            .await
-                        {
-                            Ok(_) => {}
-                            Err(_) => {}
+                    loop {
+                        tokio::select! {
+                            Some(event) = wss_bridge_rx.recv()  => {
+                                println!("received event: {}", event);
+                                 match wss_write.send(event).await {
+                                    Ok(_) => {println!("ws send Ok");}
+                                    Err(_) => {println!("ws send error")}
+                                }
+                            }
+                            _ = ping_interval.tick() => {
+                                println!("tokio select: sending heart beat {}", socket_id);
+                                match wss_write.send(Message::Ping("ping".as_bytes().to_vec())).await{
+                                    Ok(_) => { println!("ping sent")}
+                                    Err(_) => {println!("ping sent error")}
+                                }
+                            }
                         }
                     }
                 });
 
                 while let Some(message) = read.next().await {
+                    println!("message loop");
                     match message {
-                        Ok(msg) => {
-                            match msg {
-                                Message::Text(_) => {
-                                    // construct http request
-                                    let text_line = msg.into_text().unwrap();
-                                    println!("text: {:?}", text_line);
-
-                                    if !is_consumed {
-                                        match sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
-                                            Ok(()) => {}
-                                            Err(error) => println!("error: {}", error),
-                                        }
-                                        is_consumed = true;
-                                    }
-
-                                    if text_line.ends_with("_1") {
-                                        // has body
-
-                                        let (sender, body) = Body::channel();
-                                        body_writer = Some(sender);
-
-                                        let req =
-                                            lib::parse(&text_line, target).body(body).unwrap();
-                                        client_request_future = Some(client.request(req));
-                                    } else if text_line.ends_with("_2") {
-                                        // no body
-
-                                        let req = lib::parse(&text_line, target)
-                                            .body(Body::empty())
-                                            .unwrap();
-                                        let mut resp = client.request(req).await.unwrap();
-
-                                        match internal_sender_2
-                                            .send(SocketEvent::WriteToCranker(Message::Text(
-                                                format!("HTTP/1.1 {} OK\n", resp.status()),
-                                            )))
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                println!("tx response sent text")
-                                            }
-                                            Err(_) => {
-                                                println!("tx response sent text error")
-                                            }
-                                        }
-
-                                        while let Some(next) = resp.data().await {
-                                            match next {
-                                                Ok(chunk) => {
-                                                    match internal_sender_2
-                                                        .send(SocketEvent::WriteToCranker(
-                                                            Message::Binary(chunk.to_vec()),
-                                                        ))
-                                                        .await
-                                                    {
-                                                        Ok(_) => {
-                                                            println!("tx response sent binary");
-                                                        }
-                                                        Err(_) => {
-                                                            println!(
-                                                                "tx response sent binary error"
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    println!("error {}", err)
-                                                }
-                                            }
-                                        }
-
-                                        match internal_sender_2
-                                            .send(SocketEvent::WriteToCranker(Message::Close(
-                                                Some(CloseFrame {
-                                                    code: CloseCode::Normal,
-                                                    reason: "normal close".into(),
-                                                }),
-                                            )))
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                println!("close done");
-                                            }
-                                            Err(_) => {
-                                                println!("close error")
-                                            }
-                                        }
-
-                                        println!("write close")
-                                    } else if text_line.ends_with("_3") {
-                                        // body send completed
-
-                                        let mut response =
-                                            client_request_future.as_mut().unwrap().await.unwrap();
-
-                                        match internal_sender_2
-                                            .send(SocketEvent::WriteToCranker(Message::Text(
-                                                format!("HTTP/1.1 {} OK\n", response.status()),
-                                            )))
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                println!("tx sent text")
-                                            }
-                                            Err(_) => {
-                                                println!("tx sent text error")
-                                            }
-                                        }
-
-                                        // write.send_all(resp.body().data().into_stream());
-                                        while let Some(next) = response.data().await {
-                                            match next {
-                                                Ok(chunk) => {
-                                                    match internal_sender_2
-                                                        .send(SocketEvent::WriteToCranker(
-                                                            Message::Binary(chunk.to_vec()),
-                                                        ))
-                                                        .await
-                                                    {
-                                                        Ok(_) => {
-                                                            println!("tx sent binary");
-                                                        }
-                                                        Err(_) => {
-                                                            println!("tx sent binary error")
-                                                        }
-                                                    }
-                                                }
-                                                Err(err) => {
-                                                    println!("error {}", err)
-                                                }
-                                            }
-                                        }
-
-                                        match internal_sender_2
-                                            .send(SocketEvent::WriteToCranker(Message::Close(
-                                                Some(CloseFrame {
-                                                    code: CloseCode::Normal,
-                                                    reason: "normal close".into(),
-                                                }),
-                                            )))
-                                            .await
-                                        {
-                                            Ok(_) => {
-                                                println!("close done");
-                                            }
-                                            Err(_) => {
-                                                println!("tx sent binary error")
-                                            }
-                                        }
-
-                                        println!("write close")
-                                    } else {}
+                        Ok(Message::Text(message)) => {
+                            if !is_consumed {
+                                match sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
+                                    Ok(()) => { println!("ok"); }
+                                    Err(error) => { println!("error: {}", error); }
                                 }
-                                Message::Binary(_) => {
-                                    if body_writer.as_mut().is_some() {
-                                        match body_writer.as_mut().unwrap().send_data(Bytes::from(msg.into_data())).await {
-                                            Ok(_) => {
-                                                println!("writer send data done")
-                                            }
-                                            Err(_) => {
-                                                println!("writer send data err")
-                                            }
-                                        };
-                                    }
-                                }
-                                Message::Ping(_) => {}
-                                Message::Pong(_) => {}
-                                Message::Close(_) => {}
-                                Message::Frame(_) => {}
+                                is_consumed = true;
+                            }
+
+                            // construct http request
+                            let text_line = message;
+                            println!("text: {:?}", text_line);
+
+                            if text_line.ends_with("_1") {
+                                // has body
+
+                                let (sender, body) = Body::channel();
+                                target_body_writer = Some(sender);
+
+                                let req = lib::parse(&text_line, target).body(body).unwrap();
+                                target_request_future = Some(client.request(req));
+
+                            } else if text_line.ends_with("_2") {
+                                // no body
+
+                                let req = lib::parse(&text_line, target)
+                                    .body(Body::empty())
+                                    .unwrap();
+
+                                let mut response = client.request(req).await.unwrap();
+
+                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
+                                    Ok(_) => { println!("sent done"); }
+                                    Err(_) => { println!("sent error"); }
+                                };
+
+                                Self::handle_response(&write, &mut response).await;
+                            } else if text_line.ends_with("_3") {
+                                // body send completed
+
+                                let mut response = target_request_future.as_mut().unwrap().await.unwrap();
+                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
+                                    Ok(_) => { println!("sent done"); }
+                                    Err(_) => { println!("sent error"); }
+                                };
+                                Self::handle_response(&write, &mut response).await;
+                            } else {}
+                        }
+                        Ok(Message::Binary(message)) => {
+                            println!("receiving byte body");
+                            if let Some(target_body_writer) = target_body_writer.as_mut() {
+                                match target_body_writer.send_data(Bytes::from(message)).await {
+                                    Ok(_) => { println!("writer send data done"); }
+                                    Err(_) => { println!("writer send data err"); }
+                                };
                             }
                         }
-                        Err(_) => {}
+                        Ok(Message::Ping(_)) => {}
+                        Ok(Message::Pong(_)) => {}
+                        Ok(Message::Close(_)) => {}
+                        Ok(Message::Frame(_)) => {}
+                        Err(_) => {
+                            println!("tokio select: ws message error");
+                        }
                     }
                 }
             }
@@ -524,6 +399,32 @@ impl ConnectorSocket {
                 eprintln!("error: {:?}", e);
             }
         }
+    }
+
+    async fn handle_response(write: &Sender<Message>, response: &mut Response<Body>) {
+        while let Some(next) = response.data().await {
+            match next {
+                Ok(chunk) => {
+                    println!("handle_response: sending bytes");
+                    match write.send(Message::Binary(chunk.to_vec())).await {
+                        Ok(_) => { println!("sent done"); }
+                        Err(_) => { println!("sent error"); }
+                    };
+                }
+                Err(err) => { println!("error {}", err); }
+            }
+        };
+
+        println!("handle_response: closing");
+        match write.send(Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "normal close".into(),
+        }))).await {
+            Ok(_) => { println!("sent done"); }
+            Err(_) => { println!("sent error"); }
+        };
+
+        println!("write close");
     }
 }
 
@@ -534,7 +435,7 @@ async fn main() {
         target_uri: String::from("http://localhost:8080"),
         component_name: String::from("rust-testing-component"),
         router_uri_provider: || vec![String::from("wss://localhost:12001")],
-        sliding_window: 2,
+        sliding_window: 1,
         tls_connector_provider: || Some(TlsConnector::new().danger_accept_invalid_certs(true)),
     };
     let mut connector = CrankerConnector::new(config);
