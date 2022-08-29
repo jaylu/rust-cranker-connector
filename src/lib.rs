@@ -35,7 +35,11 @@ mod tests {
     use std::rc::Rc;
     use std::slice::RChunks;
     use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
+    use std::time::Duration;
+    use tokio::sync::broadcast;
+    use tokio::time;
     use super::*;
 
     #[test]
@@ -147,6 +151,86 @@ mod tests {
     //         println!("cancel")
     //     }
     // }
+    }
+
+    #[tokio::test]
+    async fn tokio_broadcast_test() {
+        // one producer, multiple subscriber scenario
+        let (tx, _) = broadcast::channel::<String>(16);
+        let mut rx_1 = tx.subscribe();
+        let mut rx_2 = tx.subscribe();
+
+        let handle_1 = tokio::spawn(async move {
+            assert_eq!(rx_1.recv().await.is_err(), true);
+            println!("rx_1 done")
+        });
+
+        let handle_2 = tokio::spawn(async move{
+            assert_eq!(rx_2.recv().await.is_err(), true);
+            println!("rx_2 done")
+        });
+
+        drop(tx);
+        let _ = handle_1.await;
+        let _ = handle_2.await;
+    }
+
+    #[tokio::test]
+    async fn tokio_broadcast_select_test_drop() {
+        // one producer, multiple subscriber scenario
+        let (tx, _) = broadcast::channel::<()>(16);
+        let mut rx_1 = tx.subscribe();
+        let is_break = Arc::new(AtomicBool::new(false));
+        let is_break_clone = is_break.clone();
+
+        let handle_1 = tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    rec = rx_1.recv() => {
+                        assert_eq!(rec.is_err(), true);
+                        break;
+                    }
+                }
+            }
+
+            is_break.store(true, Ordering::SeqCst);
+        });
+
+        assert_eq!(is_break_clone.load(Ordering::Acquire), false);
+        drop(tx);
+        let _ = handle_1.await;
+        assert_eq!(is_break_clone.load(Ordering::Acquire), true);
+    }
+
+    #[tokio::test]
+    async fn tokio_broadcast_select_test_send() {
+        // one producer, multiple subscriber scenario
+        let (tx, _) = broadcast::channel::<()>(16);
+        let mut rx_1 = tx.subscribe();
+        let is_break = Arc::new(AtomicBool::new(false));
+        let is_break_clone = is_break.clone();
+
+        let handle_1 = tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    rec = rx_1.recv() => {
+                        assert_eq!(rec.is_err(), false);
+                        break;
+                    }
+                }
+            }
+
+            is_break.store(true, Ordering::SeqCst);
+        });
+
+        assert_eq!(is_break_clone.load(Ordering::Acquire), false);
+        let _ = tx.send(());
+        let _ = handle_1.await;
+        assert_eq!(is_break_clone.load(Ordering::Acquire), true);
     }
 
 }

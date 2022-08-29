@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering::SeqCst;
+use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
@@ -21,7 +21,7 @@ use hyper::client::{HttpConnector, ResponseFuture};
 use hyper::{Body, Client};
 
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tokio::time;
 use tokio::time::Instant;
 
@@ -214,7 +214,8 @@ struct ConnectorSocket {
     component_name: String,
     route: String,
     socket_id: String,
-    registration_sender: tokio::sync::mpsc::Sender<RegistrationEvent>,
+    registration_sender: Sender<RegistrationEvent>,
+    notify_stop: broadcast::Sender<()>,
 }
 
 impl ConnectorSocket {
@@ -226,8 +227,11 @@ impl ConnectorSocket {
         target_uri: String,
         component_name: String,
         route: String,
-        sender: tokio::sync::mpsc::Sender<RegistrationEvent>,
+        sender: Sender<RegistrationEvent>,
     ) -> ConnectorSocket {
+
+        let (notify_stop, _) = broadcast::channel(1);
+
         ConnectorSocket {
             client,
             tls_connector_provider,
@@ -238,28 +242,17 @@ impl ConnectorSocket {
             route,
             socket_id: Uuid::new_v4().to_string(),
             registration_sender: sender,
-            // internal_sender: None,
+            notify_stop,
         }
     }
 
-    async fn stop(&mut self) {
-        // if self.internal_sender.is_some() {
-        //     println!("stopping connector socket");
-        //     match self
-        //         .internal_sender
-        //         .clone()
-        //         .unwrap()
-        //         .send(SocketEvent::Stop)
-        //         .await
-        //     {
-        //         Ok(_) => {}
-        //         Err(_) => {}
-        //     };
-        // }
+    fn stop(&mut self) {
+        let _ = self.notify_stop.send(());
     }
 
     async fn start(&mut self) {
         self.connect_to_router(self.client.clone(), self.tls_connector_provider).await;
+        println!("socket completed {}", self.socket_id);
     }
 
     async fn connect_to_router(
@@ -267,13 +260,13 @@ impl ConnectorSocket {
         client: Client<HttpConnector>,
         tls_connector_provider: fn() -> Option<TlsConnector>,
     ) {
-        let sender = &self.registration_sender.clone();
+        let registration_sender = &self.registration_sender.clone();
         let connector = tls_connector_provider().unwrap();
         let uri = format!( "{}/register?connectorInstanceID={}&componentName={}",
             self.registration_uri, self.connector_instance_id, self.component_name
         );
-        let target = &self.target_uri;
-        let route = &self.route;
+        let target = String::from(&self.target_uri);
+        let route = String::from(&self.route);
         let socket_id = String::from(&self.socket_id);
         let request = Request::builder()
             .method("GET")
@@ -288,9 +281,6 @@ impl ConnectorSocket {
             .body(())
             .unwrap();
 
-        let is_started = Arc::new(AtomicBool::new(false));
-        let is_started_clone = Arc::clone(&is_started);
-
         println!("connector socket: connecting to {}", &uri);
 
         match connect_async_with_tls_connector(request, Some(connector)).await {
@@ -301,13 +291,15 @@ impl ConnectorSocket {
                 let mut target_request_future: Option<ResponseFuture> = None;
                 let mut is_consumed = false;
 
-                let (write, mut wss_bridge_rx) = tokio::sync::mpsc::channel(10);
+                let (write, mut wss_channel_rx) = tokio::sync::mpsc::channel(1);
 
+                let notify_stop = self.notify_stop.clone();
                 tokio::spawn(async move {
                     let mut ping_interval = time::interval(Duration::from_secs(5));
+                    let mut notify_stop = notify_stop.subscribe();
                     loop {
                         tokio::select! {
-                            Some(event) = wss_bridge_rx.recv()  => {
+                            Some(event) = wss_channel_rx.recv()  => {
                                 println!("received event: {}", event);
                                  match wss_write.send(event).await {
                                     Ok(_) => {println!("ws send Ok");}
@@ -321,8 +313,12 @@ impl ConnectorSocket {
                                     Err(_) => {println!("ping sent error")}
                                 }
                             }
+                            _ = notify_stop.recv() => {
+                                break;
+                            }
                         }
                     }
+                    println!("connector socket stop {}", socket_id)
                 });
 
                 while let Some(message) = read.next().await {
@@ -330,7 +326,7 @@ impl ConnectorSocket {
                     match message {
                         Ok(Message::Text(message)) => {
                             if !is_consumed {
-                                match sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
+                                match registration_sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
                                     Ok(()) => { println!("ok"); }
                                     Err(error) => { println!("error: {}", error); }
                                 }
@@ -347,13 +343,13 @@ impl ConnectorSocket {
                                 let (sender, body) = Body::channel();
                                 target_body_writer = Some(sender);
 
-                                let req = lib::parse(&text_line, target).body(body).unwrap();
+                                let req = lib::parse(&text_line, target.as_str()).body(body).unwrap();
                                 target_request_future = Some(client.request(req));
 
                             } else if text_line.ends_with("_2") {
                                 // no body
 
-                                let req = lib::parse(&text_line, target)
+                                let req = lib::parse(&text_line, target.as_str())
                                     .body(Body::empty())
                                     .unwrap();
 
@@ -394,6 +390,8 @@ impl ConnectorSocket {
                         }
                     }
                 }
+
+                self.stop();
             }
             Err(e) => {
                 eprintln!("error: {:?}", e);
@@ -438,6 +436,7 @@ async fn main() {
         sliding_window: 1,
         tls_connector_provider: || Some(TlsConnector::new().danger_accept_invalid_certs(true)),
     };
+
     let mut connector = CrankerConnector::new(config);
     connector.start().await;
 
