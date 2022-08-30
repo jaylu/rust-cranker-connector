@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
@@ -122,9 +123,8 @@ impl RouterRegistration {
     }
 
     pub async fn start(self) {
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(1024);
-        let sender_2 = sender.clone();
-        let sender_3 = sender.clone();
+        let (registration_channel_tx, mut registration_channel_rx) = tokio::sync::mpsc::channel(1024);
+        let registration_channel_tx_clone = registration_channel_tx.clone();
         let idle_sockets = Arc::new(DashSet::new());
 
         let idle_sockets_2 = Arc::clone(&idle_sockets);
@@ -144,7 +144,7 @@ impl RouterRegistration {
                     String::from(&self.target_uri),
                     String::from(&self.component_name),
                     String::from(&self.route),
-                    sender_3.clone(),
+                    registration_channel_tx.clone(),
                 );
                 let socket_id = String::from(&socket.socket_id);
                 let socket_id_clone = socket_id.clone();
@@ -158,14 +158,14 @@ impl RouterRegistration {
                 tokio::spawn(async move {
                     println!("debug: starting connector socket");
                     socket.start().await;
+                    println!("debug: starting connector complete");
                 });
             }
         };
 
         tokio::spawn(async move {
             println!("debug: start receiving event");
-            let sender_3 = sender.clone();
-            while let Some(event) = receiver.recv().await {
+            while let Some(event) = registration_channel_rx.recv().await {
                 match event {
                     RegistrationEvent::RegistrationInit => {
                         add_anything_missing();
@@ -193,11 +193,10 @@ impl RouterRegistration {
                     }
                 }
             }
-            println!("debug: sender state {:?}", sender_3);
             println!("debug: stop receiving event");
         });
 
-        match sender_2.send(RegistrationEvent::RegistrationInit).await {
+        match registration_channel_tx_clone.send(RegistrationEvent::RegistrationInit).await {
             Ok(x) => x,
             Err(_) => todo!(),
         };
@@ -318,7 +317,7 @@ impl ConnectorSocket {
                             }
                         }
                     }
-                    println!("connector socket stop {}", socket_id)
+                    println!("connector socket stop _1 {}", socket_id)
                 });
 
                 while let Some(message) = read.next().await {
@@ -397,6 +396,8 @@ impl ConnectorSocket {
                 eprintln!("error: {:?}", e);
             }
         }
+
+        println!("connector socket stop _2 {}", &self.socket_id);
     }
 
     async fn handle_response(write: &Sender<Message>, response: &mut Response<Body>) {
