@@ -66,7 +66,7 @@ impl CrankerConnector {
         let registration_urls = (&self.config.router_uri_provider)();
 
         for registration_url in registration_urls {
-            let registration = RouterRegistration::new(
+            let mut registration = RouterRegistration::new(
                 self.client.clone(),
                 self.config.tls_connector_provider,
                 String::from(&self.connector_instance_id),
@@ -76,7 +76,7 @@ impl CrankerConnector {
                 String::from(&self.config.route),
                 self.config.sliding_window,
             );
-            tokio::spawn(async {
+            tokio::spawn(async move {
                 registration.start().await;
             });
         }
@@ -97,6 +97,9 @@ struct RouterRegistration {
     component_name: String,
     route: String,
     sliding_window: usize,
+    idle_sockets: Arc<DashSet<String>>,
+    event_tx: Sender<RegistrationEvent>,
+    event_rx: Receiver<RegistrationEvent>
 }
 
 impl RouterRegistration {
@@ -109,7 +112,9 @@ impl RouterRegistration {
         component_name: String,
         route: String,
         sliding_window: usize,
+
     ) -> RouterRegistration {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);
         RouterRegistration {
             tls_connector_provider,
             client,
@@ -119,88 +124,63 @@ impl RouterRegistration {
             component_name,
             route,
             sliding_window,
+            idle_sockets: Arc::new(DashSet::new()),
+            event_tx,
+            event_rx
         }
     }
 
-    pub async fn start(self) {
-        let (registration_channel_tx, mut registration_channel_rx) = tokio::sync::mpsc::channel(1024);
-        let registration_channel_tx_clone = registration_channel_tx.clone();
-        let idle_sockets = Arc::new(DashSet::new());
-
-        let idle_sockets_2 = Arc::clone(&idle_sockets);
-        let add_anything_missing = move || {
-            println!(
-                "add anything missing, idles_sockets size={}",
-                idle_sockets_2.len()
-            );
-
-            while idle_sockets_2.len() < self.sliding_window {
-                println!("debug: creating connector socket");
-                let mut socket = ConnectorSocket::new(
-                    self.client.clone(),
-                    self.tls_connector_provider,
-                    String::from(&self.connector_instance_id),
-                    String::from(&self.registration_uri),
-                    String::from(&self.target_uri),
-                    String::from(&self.component_name),
-                    String::from(&self.route),
-                    registration_channel_tx.clone(),
-                );
-                let socket_id = String::from(&socket.socket_id);
-                let socket_id_clone = socket_id.clone();
-                idle_sockets_2.insert(socket_id);
-                println!(
-                    "debug: idles_sockets add {}, size={}",
-                    socket_id_clone,
-                    idle_sockets_2.len()
-                );
-
-                tokio::spawn(async move {
-                    println!("debug: starting connector socket");
-                    socket.start().await;
-                    println!("debug: starting connector complete");
-                });
-            }
-        };
+    fn start_socket(&mut self) {
+        let mut socket = ConnectorSocket::new(
+            self.client.clone(),
+            self.tls_connector_provider,
+            String::from(&self.connector_instance_id),
+            String::from(&self.registration_uri),
+            String::from(&self.target_uri),
+            String::from(&self.component_name),
+            String::from(&self.route),
+            self.event_tx.clone(),
+        );
+        let socket_id = String::from(&socket.socket_id);
+        let _ = &self.idle_sockets.insert(socket_id);
 
         tokio::spawn(async move {
-            println!("debug: start receiving event");
-            while let Some(event) = registration_channel_rx.recv().await {
-                match event {
-                    RegistrationEvent::RegistrationInit => {
-                        add_anything_missing();
-                    }
-                    RegistrationEvent::SocketCreate(socket_id) => {
-                        let string = String::from(&socket_id);
-                        idle_sockets.insert(string);
-                        println!(
-                            "debug: idles_sockets add {}, size={}",
-                            &socket_id,
-                            idle_sockets.len()
-                        );
-                    }
-                    RegistrationEvent::SocketOpen(_socket_id) => {}
-                    RegistrationEvent::SocketConsumed(socket_id) => {
-                        idle_sockets.remove(&socket_id);
-                        // println!("debug: idles_sockets remove {}, size={}", &socket_id, idle_sockets.len());
-                        add_anything_missing();
-                    }
-                    RegistrationEvent::SocketError(socket_id) => {
-                        // TODO: sleep and debounce
-                        idle_sockets.remove(&socket_id);
-                        // println!("debug: idles_sockets remove {}, size={}", &socket_id, idle_sockets.len());
-                        add_anything_missing();
-                    }
+            socket.start().await;
+        });
+    }
+
+    fn add_anything_missing(&mut self) {
+        println!("add_anything_missing");
+        while self.idle_sockets.len() < self.sliding_window {
+           self.start_socket();
+        }
+    }
+
+    pub async fn start(&mut self) {
+        self.add_anything_missing();
+        println!("route registration started");
+        while let Some(event) = self.event_rx.recv().await {
+            match event {
+                RegistrationEvent::RegistrationInit => {
+                    self.add_anything_missing();
+                }
+                RegistrationEvent::SocketCreate(socket_id) => {
+                    let string = String::from(&socket_id);
+                    self.idle_sockets.insert(string);
+                }
+                RegistrationEvent::SocketOpen(_socket_id) => {}
+                RegistrationEvent::SocketConsumed(socket_id) => {
+                    self.idle_sockets.remove(&socket_id);
+                    self.add_anything_missing();
+                }
+                RegistrationEvent::SocketError(socket_id) => {
+                    // TODO: sleep and debounce
+                    self.idle_sockets.remove(&socket_id);
+                    self.add_anything_missing();
                 }
             }
-            println!("debug: stop receiving event");
-        });
-
-        match registration_channel_tx_clone.send(RegistrationEvent::RegistrationInit).await {
-            Ok(x) => x,
-            Err(_) => todo!(),
-        };
-        println!("route registration started");
+        }
+        println!("route registration stopped");
     }
 }
 
