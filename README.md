@@ -38,11 +38,20 @@ This project is still in development, below tasks needs to be completed before u
     # POST
     curl -k -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://localhost:12000/post
    
-    # send batch
+    # send batch post
     for i in {1..100} 
     do
     curl -k -vvv -X POST -H "Content-Type: application/json" -d '{"username":"amy"}' https://127.0.0.1:12000/post
     done
+   
+    # send batch get
+    for i in {1..10} 
+    do
+    curl -k -H "Content-Type: application/json" https://localhost:12000/hello
+    done
+    
+    # use artillery
+    artillery quick -k --count 20 --num 100 https://localhost:12000/hello
     ```
 
 

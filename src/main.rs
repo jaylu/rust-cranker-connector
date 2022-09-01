@@ -1,7 +1,4 @@
-use std::io::Read;
-use std::sync::atomic::Ordering::{Relaxed, SeqCst};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -11,20 +8,20 @@ use async_tungstenite::tungstenite::handshake::client::generate_key;
 use async_tungstenite::tungstenite::http::Request;
 use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use async_tungstenite::tungstenite::protocol::CloseFrame;
-use async_tungstenite::tungstenite::{Error, Message};
+use async_tungstenite::tungstenite::Message;
 use bytes::Bytes;
 use dashmap::DashSet;
-use futures::{future, StreamExt};
-use futures::{FutureExt, SinkExt};
+use futures::StreamExt;
+use futures::SinkExt;
 use http::Response;
-use hyper::body::{HttpBody};
+use hyper::body::HttpBody;
 use hyper::client::{HttpConnector, ResponseFuture};
 use hyper::{Body, Client};
 
 use tokio::sync::mpsc::{Receiver, Sender};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use tokio::time;
-use tokio::time::Instant;
+
 
 use uuid::Uuid;
 
@@ -37,7 +34,6 @@ enum RegistrationEvent {
     SocketConsumed(String),
     SocketError(String),
 }
-
 struct Config {
     route: String,
     target_uri: String,
@@ -99,7 +95,7 @@ struct RouterRegistration {
     sliding_window: usize,
     idle_sockets: Arc<DashSet<String>>,
     event_tx: Sender<RegistrationEvent>,
-    event_rx: Receiver<RegistrationEvent>
+    event_rx: Receiver<RegistrationEvent>,
 }
 
 impl RouterRegistration {
@@ -112,9 +108,8 @@ impl RouterRegistration {
         component_name: String,
         route: String,
         sliding_window: usize,
-
     ) -> RouterRegistration {
-        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
         RouterRegistration {
             tls_connector_provider,
             client,
@@ -126,7 +121,7 @@ impl RouterRegistration {
             sliding_window,
             idle_sockets: Arc::new(DashSet::new()),
             event_tx,
-            event_rx
+            event_rx,
         }
     }
 
@@ -152,7 +147,7 @@ impl RouterRegistration {
     fn add_anything_missing(&mut self) {
         println!("add_anything_missing");
         while self.idle_sockets.len() < self.sliding_window {
-           self.start_socket();
+            self.start_socket();
         }
     }
 
@@ -208,7 +203,6 @@ impl ConnectorSocket {
         route: String,
         sender: Sender<RegistrationEvent>,
     ) -> ConnectorSocket {
-
         let (notify_stop, _) = broadcast::channel(1);
 
         ConnectorSocket {
@@ -226,6 +220,7 @@ impl ConnectorSocket {
     }
 
     fn stop(&mut self) {
+        // TODO: skip if stopped
         let _ = self.notify_stop.send(());
     }
 
@@ -234,14 +229,11 @@ impl ConnectorSocket {
         println!("socket completed {}", self.socket_id);
     }
 
-    async fn connect_to_router(
-        &mut self,
-        client: Client<HttpConnector>,
-        tls_connector_provider: fn() -> Option<TlsConnector>,
-    ) {
+    async fn connect_to_router(&mut self, client: Client<HttpConnector>, tls_connector_provider: fn() -> Option<TlsConnector>) {
         let registration_sender = &self.registration_sender.clone();
         let connector = tls_connector_provider().unwrap();
-        let uri = format!( "{}/register?connectorInstanceID={}&componentName={}",
+        let uri = format!(
+            "{}/register?connectorInstanceID={}&componentName={}",
             self.registration_uri, self.connector_instance_id, self.component_name
         );
         let target = String::from(&self.target_uri);
@@ -306,8 +298,12 @@ impl ConnectorSocket {
                         Ok(Message::Text(message)) => {
                             if !is_consumed {
                                 match registration_sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
-                                    Ok(()) => { println!("ok"); }
-                                    Err(error) => { println!("error: {}", error); }
+                                    Ok(()) => {
+                                        println!("ok");
+                                    }
+                                    Err(error) => {
+                                        println!("error: {}", error);
+                                    }
                                 }
                                 is_consumed = true;
                             }
@@ -324,19 +320,20 @@ impl ConnectorSocket {
 
                                 let req = lib::parse(&text_line, target.as_str()).body(body).unwrap();
                                 target_request_future = Some(client.request(req));
-
                             } else if text_line.ends_with("_2") {
                                 // no body
 
-                                let req = lib::parse(&text_line, target.as_str())
-                                    .body(Body::empty())
-                                    .unwrap();
+                                let req = lib::parse(&text_line, target.as_str()).body(Body::empty()).unwrap();
 
                                 let mut response = client.request(req).await.unwrap();
 
                                 match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
-                                    Ok(_) => { println!("sent done"); }
-                                    Err(_) => { println!("sent error"); }
+                                    Ok(_) => {
+                                        println!("sent done");
+                                    }
+                                    Err(_) => {
+                                        println!("sent error");
+                                    }
                                 };
 
                                 Self::handle_response(&write, &mut response).await;
@@ -345,18 +342,27 @@ impl ConnectorSocket {
 
                                 let mut response = target_request_future.as_mut().unwrap().await.unwrap();
                                 match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
-                                    Ok(_) => { println!("sent done"); }
-                                    Err(_) => { println!("sent error"); }
+                                    Ok(_) => {
+                                        println!("sent done");
+                                    }
+                                    Err(_) => {
+                                        println!("sent error");
+                                    }
                                 };
                                 Self::handle_response(&write, &mut response).await;
-                            } else {}
+                            } else {
+                            }
                         }
                         Ok(Message::Binary(message)) => {
                             println!("receiving byte body");
                             if let Some(target_body_writer) = target_body_writer.as_mut() {
                                 match target_body_writer.send_data(Bytes::from(message)).await {
-                                    Ok(_) => { println!("writer send data done"); }
-                                    Err(_) => { println!("writer send data err"); }
+                                    Ok(_) => {
+                                        println!("writer send data done");
+                                    }
+                                    Err(_) => {
+                                        println!("writer send data err");
+                                    }
                                 };
                             }
                         }
@@ -365,7 +371,8 @@ impl ConnectorSocket {
                         Ok(Message::Close(_)) => {}
                         Ok(Message::Frame(_)) => {}
                         Err(_) => {
-                            println!("tokio select: ws message error");
+                            self.stop();
+                            let _ = registration_sender.send(RegistrationEvent::SocketError(String::from(&self.socket_id))).await;
                         }
                     }
                 }
@@ -386,21 +393,34 @@ impl ConnectorSocket {
                 Ok(chunk) => {
                     println!("handle_response: sending bytes");
                     match write.send(Message::Binary(chunk.to_vec())).await {
-                        Ok(_) => { println!("sent done"); }
-                        Err(_) => { println!("sent error"); }
+                        Ok(_) => {
+                            println!("sent done");
+                        }
+                        Err(_) => {
+                            println!("sent error");
+                        }
                     };
                 }
-                Err(err) => { println!("error {}", err); }
+                Err(err) => {
+                    println!("error {}", err);
+                }
             }
-        };
+        }
 
         println!("handle_response: closing");
-        match write.send(Message::Close(Some(CloseFrame {
-            code: CloseCode::Normal,
-            reason: "normal close".into(),
-        }))).await {
-            Ok(_) => { println!("sent done"); }
-            Err(_) => { println!("sent error"); }
+        match write
+            .send(Message::Close(Some(CloseFrame {
+                code: CloseCode::Normal,
+                reason: "normal close".into(),
+            })))
+            .await
+        {
+            Ok(_) => {
+                println!("sent done");
+            }
+            Err(_) => {
+                println!("sent error");
+            }
         };
 
         println!("write close");
