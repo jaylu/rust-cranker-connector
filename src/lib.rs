@@ -59,6 +59,15 @@ mod tests {
     }
 
     #[test]
+    fn test_vec_chunks() {
+        let sample: Vec<&str> = vec!["a", "b", "c", "d", "e"];
+        let collects: Vec<&[&str]> = sample.chunks(2).collect();
+        for item in collects {
+            println!("output: {:?}", item);
+        }
+    }
+
+    #[test]
     fn test_option() {
         let mut v: Option<String> = None;
         println!("output: {:?}", &v);

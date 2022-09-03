@@ -11,17 +11,16 @@ use async_tungstenite::tungstenite::protocol::CloseFrame;
 use async_tungstenite::tungstenite::Message;
 use bytes::Bytes;
 use dashmap::DashSet;
-use futures::StreamExt;
 use futures::SinkExt;
+use futures::StreamExt;
 use http::Response;
 use hyper::body::HttpBody;
 use hyper::client::{HttpConnector, ResponseFuture};
 use hyper::{Body, Client};
 
-use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::broadcast;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::time;
-
 
 use uuid::Uuid;
 
@@ -145,7 +144,7 @@ impl RouterRegistration {
     }
 
     fn add_anything_missing(&mut self) {
-        println!("add_anything_missing");
+        // println!("add_anything_missing");
         while self.idle_sockets.len() < self.sliding_window {
             self.start_socket();
         }
@@ -252,8 +251,6 @@ impl ConnectorSocket {
             .body(())
             .unwrap();
 
-        println!("connector socket: connecting to {}", &uri);
-
         match connect_async_with_tls_connector(request, Some(connector)).await {
             Ok((stream, _response)) => {
                 let (mut wss_write, mut read) = stream.split();
@@ -271,16 +268,20 @@ impl ConnectorSocket {
                     loop {
                         tokio::select! {
                             Some(event) = wss_channel_rx.recv()  => {
-                                println!("received event: {}", event);
+                                // println!("received event: {}", event);
                                  match wss_write.send(event).await {
-                                    Ok(_) => {println!("ws send Ok");}
+                                    Ok(_) => {
+                                        // println!("ws send Ok");
+                                    }
                                     Err(_) => {println!("ws send error")}
                                 }
                             }
                             _ = ping_interval.tick() => {
                                 println!("tokio select: sending heart beat {}", socket_id);
                                 match wss_write.send(Message::Ping("ping".as_bytes().to_vec())).await{
-                                    Ok(_) => { println!("ping sent")}
+                                    Ok(_) => { 
+                                        // println!("ping sent")
+                                    }
                                     Err(_) => {println!("ping sent error")}
                                 }
                             }
@@ -293,13 +294,12 @@ impl ConnectorSocket {
                 });
 
                 while let Some(message) = read.next().await {
-                    println!("message loop");
                     match message {
                         Ok(Message::Text(message)) => {
                             if !is_consumed {
                                 match registration_sender.send(RegistrationEvent::SocketConsumed(String::from(&self.socket_id))).await {
                                     Ok(()) => {
-                                        println!("ok");
+                                        // println!("ok");
                                     }
                                     Err(error) => {
                                         println!("error: {}", error);
@@ -310,8 +310,7 @@ impl ConnectorSocket {
 
                             // construct http request
                             let text_line = message;
-                            println!("text: {:?}", text_line);
-
+                        
                             if text_line.ends_with("_1") {
                                 // has body
 
@@ -326,10 +325,14 @@ impl ConnectorSocket {
                                 let req = lib::parse(&text_line, target.as_str()).body(Body::empty()).unwrap();
 
                                 let mut response = client.request(req).await.unwrap();
+                                let headers = response.headers().into_iter().fold(String::new(), |mut acc, (key, value)| {
+                                    acc.push_str(format!("{}:{}\n", key.to_string().as_str(), value.to_str().unwrap().to_string().as_str()).as_str());
+                                    acc
+                                });
 
-                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
+                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n{}", response.status().as_u16(), headers))).await {
                                     Ok(_) => {
-                                        println!("sent done");
+                                        // println!("sent done");
                                     }
                                     Err(_) => {
                                         println!("sent error");
@@ -341,9 +344,14 @@ impl ConnectorSocket {
                                 // body send completed
 
                                 let mut response = target_request_future.as_mut().unwrap().await.unwrap();
-                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n", response.status().as_u16()))).await {
+                                let headers = response.headers().into_iter().fold(String::new(), |mut acc, (key, value)| {
+                                    acc.push_str(format!("{}:{}\n", key.to_string().as_str(), value.to_str().unwrap().to_string().as_str()).as_str());
+                                    acc
+                                });
+
+                                match write.send(Message::Text(format!("HTTP/1.1 {} OK\n{}", response.status().as_u16(), headers))).await {
                                     Ok(_) => {
-                                        println!("sent done");
+                                        // println!("sent done");
                                     }
                                     Err(_) => {
                                         println!("sent error");
@@ -354,11 +362,11 @@ impl ConnectorSocket {
                             }
                         }
                         Ok(Message::Binary(message)) => {
-                            println!("receiving byte body");
+                            // println!("receiving byte body");
                             if let Some(target_body_writer) = target_body_writer.as_mut() {
                                 match target_body_writer.send_data(Bytes::from(message)).await {
                                     Ok(_) => {
-                                        println!("writer send data done");
+                                        // println!("writer send data done");
                                     }
                                     Err(_) => {
                                         println!("writer send data err");
@@ -390,16 +398,19 @@ impl ConnectorSocket {
     async fn handle_response(write: &Sender<Message>, response: &mut Response<Body>) {
         while let Some(next) = response.data().await {
             match next {
-                Ok(chunk) => {
-                    println!("handle_response: sending bytes");
-                    match write.send(Message::Binary(chunk.to_vec())).await {
-                        Ok(_) => {
-                            println!("sent done");
-                        }
-                        Err(_) => {
-                            println!("sent error");
-                        }
-                    };
+                Ok(data) => {
+                    let mut chunks  = data.chunks(65536);
+                    while let Some(chunk) = chunks.next() {
+                        println!("handle_response: sending bytes {}", chunk.len());
+                        match write.send(Message::Binary(chunk.to_vec())).await {
+                            Ok(_) => {
+                                // println!("sent done");
+                            }
+                            Err(_) => {
+                                println!("sent error");
+                            }
+                        };
+                    }
                 }
                 Err(err) => {
                     println!("error {}", err);
@@ -434,7 +445,7 @@ async fn main() {
         target_uri: String::from("http://localhost:8080"),
         component_name: String::from("rust-testing-component"),
         router_uri_provider: || vec![String::from("wss://localhost:12001")],
-        sliding_window: 1,
+        sliding_window: 2,
         tls_connector_provider: || Some(TlsConnector::new().danger_accept_invalid_certs(true)),
     };
 
