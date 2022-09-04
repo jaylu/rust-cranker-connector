@@ -40,7 +40,7 @@ struct Config {
     component_name: String,
     router_uri_provider: fn() -> Vec<String>,
     sliding_window: usize,
-    tls_connector_provider: fn() -> Option<TlsConnector>,
+    tls_connector: Option<TlsConnector>,
 }
 
 struct CrankerConnector {
@@ -69,7 +69,7 @@ impl CrankerConnector {
         for registration_url in registration_urls {
             let mut registration = RouterRegistration::new(
                 self.client.clone(),
-                self.config.tls_connector_provider,
+                self.config.tls_connector.clone(),
                 String::from(&self.connector_instance_id),
                 registration_url,
                 String::from(&self.config.target_uri),
@@ -91,7 +91,7 @@ impl CrankerConnector {
 
 struct RouterRegistration {
     client: Client<HttpConnector>,
-    tls_connector_provider: fn() -> Option<TlsConnector>,
+    tls_connector: Option<TlsConnector>,
     connector_instance_id: String,
     registration_uri: String,
     target_uri: String,
@@ -107,7 +107,7 @@ struct RouterRegistration {
 impl RouterRegistration {
     pub fn new(
         client: Client<HttpConnector>,
-        tls_connector_provider: fn() -> Option<TlsConnector>,
+        tls_connector: Option<TlsConnector>,
         connector_instance_id: String,
         registration_uri: String,
         target_uri: String,
@@ -117,7 +117,7 @@ impl RouterRegistration {
     ) -> RouterRegistration {
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(1024);
         RouterRegistration {
-            tls_connector_provider,
+            tls_connector,
             client,
             connector_instance_id,
             registration_uri,
@@ -135,7 +135,7 @@ impl RouterRegistration {
     fn start_socket(&mut self) {
         let mut socket = ConnectorSocket::new(
             self.client.clone(),
-            self.tls_connector_provider,
+            self.tls_connector.clone(),
             String::from(&self.connector_instance_id),
             String::from(&self.registration_uri),
             String::from(&self.target_uri),
@@ -193,7 +193,7 @@ impl RouterRegistration {
 
 struct ConnectorSocket {
     client: Client<HttpConnector>,
-    tls_connector_provider: fn() -> Option<TlsConnector>,
+    tls_connector: Option<TlsConnector>,
     connector_instance_id: String,
     registration_uri: String,
     target_uri: String,
@@ -207,7 +207,7 @@ struct ConnectorSocket {
 impl ConnectorSocket {
     pub fn new(
         client: Client<HttpConnector>,
-        tls_connector_provider: fn() -> Option<TlsConnector>,
+        tls_connector: Option<TlsConnector>,
         connector_instance_id: String,
         registration_uri: String,
         target_uri: String,
@@ -219,7 +219,7 @@ impl ConnectorSocket {
 
         ConnectorSocket {
             client,
-            tls_connector_provider,
+            tls_connector,
             connector_instance_id,
             registration_uri,
             target_uri,
@@ -237,12 +237,12 @@ impl ConnectorSocket {
     }
 
     async fn start(&mut self) {
-        self.connect_to_router(self.client.clone(), self.tls_connector_provider).await;
+        self.connect_to_router(self.client.clone(), self.tls_connector.clone()).await;
     }
 
-    async fn connect_to_router(&mut self, client: Client<HttpConnector>, tls_connector_provider: fn() -> Option<TlsConnector>) {
+    async fn connect_to_router(&mut self, client: Client<HttpConnector>, tls_connector: Option<TlsConnector>) {
         let registration_sender = &self.registration_sender.clone();
-        // let connector = tls_connector_provider().unwrap();
+        // let connector = tls_connector().unwrap();
         let uri = format!(
             "{}/register?connectorInstanceID={}&componentName={}",
             self.registration_uri, self.connector_instance_id, self.component_name
@@ -263,8 +263,8 @@ impl ConnectorSocket {
             .body(())
             .unwrap();
 
-        let accept_all_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
-        let _tls_connector = tokio_tungstenite::Connector::NativeTls(accept_all_connector);
+        // let accept_all_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
+        let _tls_connector = tokio_tungstenite::Connector::NativeTls(tls_connector.unwrap());
         let _websocket_config = WebSocketConfig {
             max_send_queue: Some(10),
             max_message_size: Some(64 << 20),
@@ -272,7 +272,7 @@ impl ConnectorSocket {
             accept_unmasked_frames: false,
         };
 
-        match tokio_tungstenite::connect_async_tls_with_config(request, Some(_websocket_config), Some(_tls_connector)).await {
+        match tokio_tungstenite::connect_async_tls_with_config(request, Some(_websocket_config), Some(_tls_connector.clone())).await {
             Ok((stream, _response)) => {
                 let _ = registration_sender.send(RegistrationEvent::SocketOpen(String::from(&self.socket_id))).await;
 
@@ -465,7 +465,7 @@ async fn main() {
         component_name: String::from("rust-testing-component"),
         router_uri_provider: || vec![String::from("wss://localhost:12001")],
         sliding_window: 2,
-        tls_connector_provider: || None,
+        tls_connector: Option::Some(TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap()),
     };
 
     let mut connector = CrankerConnector::new(config);
