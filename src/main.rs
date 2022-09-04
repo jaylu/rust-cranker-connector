@@ -21,6 +21,7 @@ use tokio_tungstenite::tungstenite::handshake::client::generate_key;
 use tokio_tungstenite::tungstenite::handshake::client::Request;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -50,10 +51,15 @@ struct CrankerConnector {
 
 impl CrankerConnector {
     pub fn new(config: Config) -> CrankerConnector {
+        let client = Client::builder()
+            .pool_idle_timeout(Duration::from_secs(30))
+            .http1_max_buf_size(8192)
+            .http2_max_send_buf_size(8192)
+            .build_http();
         return CrankerConnector {
             connector_instance_id: Uuid::new_v4().to_string(),
             config,
-            client: Client::new(),
+            client,
         };
     }
 
@@ -258,15 +264,20 @@ impl ConnectorSocket {
             .unwrap();
 
         let accept_all_connector = TlsConnector::builder().danger_accept_invalid_certs(true).build().unwrap();
-        let tls_connector = tokio_tungstenite::Connector::NativeTls(accept_all_connector);
+        let _tls_connector = tokio_tungstenite::Connector::NativeTls(accept_all_connector);
+        let _websocket_config = WebSocketConfig {
+            max_send_queue: Some(10),
+            max_message_size: Some(64 << 20),
+            max_frame_size: Some(16 << 20),
+            accept_unmasked_frames: false,
+        };
 
-        match tokio_tungstenite::connect_async_tls_with_config(request, None, Some(tls_connector)).await {
+        match tokio_tungstenite::connect_async_tls_with_config(request, Some(_websocket_config), Some(_tls_connector)).await {
             Ok((stream, _response)) => {
-
                 let _ = registration_sender.send(RegistrationEvent::SocketOpen(String::from(&self.socket_id))).await;
 
                 let (mut wss_write, mut read) = stream.split();
-                
+
                 let mut target_body_writer: Option<hyper::body::Sender> = None;
                 let mut target_request_future: Option<ResponseFuture> = None;
                 let mut is_consumed = false;
@@ -274,7 +285,7 @@ impl ConnectorSocket {
                 let (write, mut wss_channel_rx) = tokio::sync::mpsc::channel(1);
 
                 let notify_stop = self.notify_stop.clone();
-                
+
                 tokio::spawn(async move {
                     let mut ping_interval = time::interval(Duration::from_secs(5));
                     let mut notify_stop = notify_stop.subscribe();
@@ -326,7 +337,6 @@ impl ConnectorSocket {
 
                                 let req = lib::parse(&text_line, target.as_str()).body(body).unwrap();
                                 target_request_future = Some(client.request(req));
-
                             } else if text_line.ends_with("_2") {
                                 // no body
 
@@ -337,25 +347,22 @@ impl ConnectorSocket {
                                         acc.push_str(format!("{}:{}\n", key.to_string().as_str(), value.to_str().unwrap().to_string().as_str()).as_str());
                                         acc
                                     });
-    
+
                                     if let Err(_) = write
                                         .send(Message::Text(format!("HTTP/1.1 {} OK\n{}", response.status().as_u16(), headers)))
                                         .await
                                     {
                                         println!("sent error");
                                     };
-    
-                                    Self::handle_response(&write, &mut response).await;
 
+                                    Self::handle_response(&write, &mut response).await;
                                 } else {
                                     todo!()
                                 }
-                                
                             } else if text_line.ends_with("_3") {
                                 // body send completed
 
                                 if let Ok(mut response) = target_request_future.as_mut().unwrap().await {
-
                                     let headers = response.headers().into_iter().fold(String::new(), |mut acc, (key, value)| {
                                         acc.push_str(format!("{}:{}\n", key.to_string().as_str(), value.to_str().unwrap().to_string().as_str()).as_str());
                                         acc
@@ -383,9 +390,7 @@ impl ConnectorSocket {
                                     Ok(_) => {
                                         // println!("writer send data done");
                                     }
-                                    Err(_) => {
-                                        
-                                    }
+                                    Err(_) => {}
                                 };
                             }
                         }
@@ -407,7 +412,6 @@ impl ConnectorSocket {
                 let _ = registration_sender.send(RegistrationEvent::SocketError(String::from(&self.socket_id))).await;
             }
         }
-
     }
 
     async fn handle_response(write: &Sender<Message>, response: &mut Response<Body>) {
