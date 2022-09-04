@@ -147,6 +147,7 @@ impl RouterRegistration {
         let _ = &self.idle_sockets.insert(socket_id);
 
         tokio::spawn(async move {
+            println!("starting {}", socket.socket_id);
             socket.start().await;
         });
     }
@@ -293,23 +294,20 @@ impl ConnectorSocket {
                         tokio::select! {
                             Some(event) = wss_channel_rx.recv()  => {
                                 // println!("received event: {}", event);
-                                 match wss_write.send(event).await {
-                                    Ok(_) => {
-                                        // println!("ws send Ok");
-                                    }
-                                    Err(_) => {println!("ws send error")}
+                                if let Err(e) = wss_write.feed(event).await {
+                                    println!("ws send error {}", e);
+                                    break;
                                 }
                             }
                             _ = ping_interval.tick() => {
-                                println!("tokio select: sending heart beat {}", socket_id);
-                                match wss_write.send(Message::Ping("ping".as_bytes().to_vec())).await{
-                                    Ok(_) => {
-                                        // println!("ping sent")
-                                    }
-                                    Err(_) => {println!("ping sent error")}
+                                // println!("tokio select: sending heart beat {}", socket_id);
+                                if let Err(e) = wss_write.send(Message::Ping("ping".as_bytes().to_vec())).await {
+                                    println!("ping sent error {}", e);
+                                    break;
                                 }
                             }
                             _ = notify_stop.recv() => {
+                                let _ = wss_write.flush().await;
                                 let _ = wss_write.close().await;
                                 break;
                             }
@@ -386,11 +384,8 @@ impl ConnectorSocket {
                         Ok(Message::Binary(message)) => {
                             // println!("receiving byte body");
                             if let Some(target_body_writer) = target_body_writer.as_mut() {
-                                match target_body_writer.send_data(Bytes::from(message)).await {
-                                    Ok(_) => {
-                                        // println!("writer send data done");
-                                    }
-                                    Err(_) => {}
+                                if let Err(e) = target_body_writer.send_data(Bytes::from(message)).await {
+                                    println!("writer error {}", e);
                                 };
                             }
                         }
@@ -420,14 +415,10 @@ impl ConnectorSocket {
                 Ok(data) => {
                     let mut chunks = data.chunks(65536);
                     while let Some(chunk) = chunks.next() {
-                        println!("handle_response: sending bytes {}", chunk.len());
-                        match write.send(Message::Binary(chunk.to_owned())).await {
-                            Ok(_) => {
-                                // println!("sent done");
-                            }
-                            Err(_) => {
-                                println!("sent error");
-                            }
+                        // println!("handle_response: sending bytes {}", chunk.len());
+                        if let Err(e) = write.send(Message::Binary(chunk.to_owned())).await {
+                            println!("sent error {}", e);
+                            todo!("break loop")
                         };
                     }
                 }
@@ -438,22 +429,15 @@ impl ConnectorSocket {
         }
 
         println!("handle_response: closing");
-        match write
+        if let Err(e) = write
             .send(Message::Close(Some(CloseFrame {
                 code: CloseCode::Normal,
                 reason: "normal close".into(),
             })))
             .await
         {
-            Ok(_) => {
-                println!("sent done");
-            }
-            Err(_) => {
-                println!("sent error");
-            }
+            println!("error on closing websocket: {}", e);
         };
-
-        println!("write close");
     }
 }
 
