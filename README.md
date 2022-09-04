@@ -12,6 +12,7 @@ Cranker connector with Rust
 This project is still in development, below tasks needs to be completed before using it in production
 
 - [x] heart beat for each websocket channel
+- [ ] reconnect debounce
 - [ ] stop connector socket properly
 - [ ] stop by calling wss deregister end point
 - [ ] proper error handling

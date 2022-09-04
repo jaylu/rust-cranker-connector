@@ -14,33 +14,57 @@ pub fn parse(input: &str, target: &str) -> Builder {
             Some(index) => {
                 request_builder = request_builder.header(&line[0..index], &line[index + 1..]);
             }
-            None => ()
+            None => (),
         }
     }
 
     let uri = format!("{}{}", target, path);
     println!("uri={}, method={}", uri, method);
-    return request_builder
-        .method(Method::from_str(method).unwrap())
-        .uri(uri);
+    return request_builder.method(Method::from_str(method).unwrap()).uri(uri);
 }
 
 
+pub fn back_out(attempts: u32) -> u64 {
+    
+    static MAX_BACK_OUT: u64 = 10000;
+    static BASE:u64 = 500;
+    
+    let increase = if attempts > 13 {
+        MAX_BACK_OUT
+    } else {
+        let result = 0x2u64.pow(attempts);
+        if result > MAX_BACK_OUT {
+            MAX_BACK_OUT
+        } else {
+            result
+        }
+    };
+    return BASE + increase;
+}
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::borrow::{Borrow, BorrowMut};
     use std::cell::{RefCell, RefMut};
     use std::collections::HashMap;
     use std::rc::Rc;
     use std::slice::RChunks;
-    use std::sync::{Arc, Mutex};
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
     use tokio::sync::broadcast;
     use tokio::time;
-    use super::*;
+
+    #[test]
+    fn test_back_out() {
+        assert_eq!(back_out(1), 502);
+        assert_eq!(back_out(2), 504);
+        assert_eq!(back_out(10), 1524);
+        assert_eq!(back_out(14), 10500);
+        assert_eq!(back_out(2343), 10500);
+    }
 
     #[test]
     fn test_parse() {
@@ -87,14 +111,10 @@ mod tests {
 
         let mut handles = vec![];
 
-        let handle_1 = thread::spawn(move || {
-            println!("{:?}", rc1)
-        });
+        let handle_1 = thread::spawn(move || println!("{:?}", rc1));
         handles.push(handle_1);
 
-        let handle_2 = thread::spawn(move || {
-            println!("{:?}", rc2)
-        });
+        let handle_2 = thread::spawn(move || println!("{:?}", rc2));
         handles.push(handle_2);
 
         for handle in handles {
@@ -148,18 +168,18 @@ mod tests {
 
     #[test]
     fn test_tokio_select() {
-    //     tokio::select! {
-    //     _ = async {
-    //         while &isStarted {
-    //             &interval.tick().await;
-    //         }
-    //         println!("complete")
-    //     } => {},
-    //     _cancel = rx => {
-    //         isStarted = false;
-    //         println!("cancel")
-    //     }
-    // }
+        //     tokio::select! {
+        //     _ = async {
+        //         while &isStarted {
+        //             &interval.tick().await;
+        //         }
+        //         println!("complete")
+        //     } => {},
+        //     _cancel = rx => {
+        //         isStarted = false;
+        //         println!("cancel")
+        //     }
+        // }
     }
 
     #[tokio::test]
@@ -174,7 +194,7 @@ mod tests {
             println!("rx_1 done")
         });
 
-        let handle_2 = tokio::spawn(async move{
+        let handle_2 = tokio::spawn(async move {
             assert_eq!(rx_2.recv().await.is_err(), true);
             println!("rx_2 done")
         });
@@ -241,5 +261,4 @@ mod tests {
         let _ = handle_1.await;
         assert_eq!(is_break_clone.load(Ordering::Acquire), true);
     }
-
 }

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::thread;
 use std::time::Duration;
 
@@ -95,6 +96,7 @@ struct RouterRegistration {
     idle_sockets: Arc<DashSet<String>>,
     event_tx: Sender<RegistrationEvent>,
     event_rx: Receiver<RegistrationEvent>,
+    failureAttempts: Arc<AtomicU32>
 }
 
 impl RouterRegistration {
@@ -121,6 +123,7 @@ impl RouterRegistration {
             idle_sockets: Arc::new(DashSet::new()),
             event_tx,
             event_rx,
+            failureAttempts: Arc::new(AtomicU32::new(0))
         }
     }
 
@@ -143,7 +146,7 @@ impl RouterRegistration {
         });
     }
 
-    fn add_anything_missing(&mut self) {
+    async fn add_anything_missing(&mut self) {
         // println!("add_anything_missing");
         while self.idle_sockets.len() < self.sliding_window {
             self.start_socket();
@@ -151,26 +154,33 @@ impl RouterRegistration {
     }
 
     pub async fn start(&mut self) {
-        self.add_anything_missing();
+        self.add_anything_missing().await;
         println!("route registration started");
         while let Some(event) = self.event_rx.recv().await {
             match event {
                 RegistrationEvent::RegistrationInit => {
-                    self.add_anything_missing();
+                    self.add_anything_missing().await;
                 }
                 RegistrationEvent::SocketCreate(socket_id) => {
                     let string = String::from(&socket_id);
                     self.idle_sockets.insert(string);
                 }
-                RegistrationEvent::SocketOpen(_socket_id) => {}
+                RegistrationEvent::SocketOpen(_socket_id) => {
+                    self.failureAttempts.store(0, std::sync::atomic::Ordering::Relaxed)
+                }
                 RegistrationEvent::SocketConsumed(socket_id) => {
                     self.idle_sockets.remove(&socket_id);
-                    self.add_anything_missing();
+                    self.add_anything_missing().await;
                 }
                 RegistrationEvent::SocketError(socket_id) => {
                     // TODO: sleep and debounce
+                    self.failureAttempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     self.idle_sockets.remove(&socket_id);
-                    self.add_anything_missing();
+                    let attempts = self.failureAttempts.load(std::sync::atomic::Ordering::Relaxed);
+                    let back_out_time = Duration::from_millis(lib::back_out(attempts));
+                    println!("going to add_anything_missing with back out time {:?}", back_out_time);
+                    tokio::time::sleep(back_out_time).await;
+                    self.add_anything_missing().await;
                 }
             }
         }
@@ -440,6 +450,8 @@ impl ConnectorSocket {
 
 #[tokio::main]
 async fn main() {
+
+
     let config = Config {
         route: String::from("*"),
         target_uri: String::from("http://localhost:8080"),
