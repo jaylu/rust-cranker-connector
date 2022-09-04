@@ -205,6 +205,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tokio_broadcast_send_after_receiver_drop() {
+        // one producer, multiple subscriber scenario
+        let (tx, _) = broadcast::channel::<()>(16);
+        let mut rx_1 = tx.subscribe();
+        let is_break = Arc::new(AtomicBool::new(false));
+        let is_break_clone = is_break.clone();
+
+        let handle_1 = tokio::spawn(async move {
+            let mut interval = time::interval(Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    rec = rx_1.recv() => {
+                        assert_eq!(rec.is_err(), false);
+                        break;
+                    }
+                }
+                println!("rx_1 dropped")
+            }
+
+            is_break.store(true, Ordering::SeqCst);
+        });
+
+        assert_eq!(is_break_clone.load(Ordering::Acquire), false);
+        let _ = tx.send(());
+        let _ = handle_1.await;
+        assert_eq!(is_break_clone.load(Ordering::Acquire), true);
+        let result = tx.send(());
+        assert_eq!(result.is_err(), true);
+    }
+
+    #[tokio::test]
     async fn tokio_broadcast_select_test_drop() {
         // one producer, multiple subscriber scenario
         let (tx, _) = broadcast::channel::<()>(16);
